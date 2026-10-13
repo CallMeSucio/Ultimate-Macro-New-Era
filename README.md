@@ -13,11 +13,11 @@
   <img src=".github/assets/community-stats.svg" width="760" alt="GitHub downloads from Darksen and The New Era, Discord community members, and GitHub stars">
 </p>
 
-<p align="center"><strong><a href="LICENSE">Open source</a></strong> &nbsp;·&nbsp; <strong><a href="https://github.com/UltimateMacro/Ultimate-Macro-New-Era/releases">Official releases</a></strong> &nbsp;·&nbsp; <strong><a href="#the-team">Community-maintained</a></strong></p>
+<p align="center"><strong><a href="LICENSE">Source available</a></strong> &nbsp;·&nbsp; <strong><a href="https://github.com/UltimateMacro/Ultimate-Macro-New-Era/releases">Official releases</a></strong> &nbsp;·&nbsp; <strong><a href="#the-team">Community-maintained</a></strong></p>
 
 ## What is Ultimate Macro?
 
-**Ultimate Macro** is a free, open-source Windows tool for automating **Roblox Tower Defense Simulator (TDS)**. You can record or import a strategy, then let the macro handle repeatable gameplay actions such as tower placement, upgrades, abilities, and movement between matches.
+**Ultimate Macro** is a free-to-use, source-available Windows tool for automating **Roblox Tower Defense Simulator (TDS)**. You can record or import a strategy, then let the macro handle repeatable gameplay actions such as tower placement, upgrades, abilities, and movement between matches.
 
 The project was originally created by [Darksen](https://github.com/DarksenDev/tds-macro) and is now community-maintained. We focus on making TDS farming more convenient while keeping the software accessible and open to inspection.
 
@@ -82,7 +82,7 @@ Strategies are not universal. They can depend on a particular game update, loado
 
 **We want users to be able to check, not just take our word for it.**
 
-Ultimate Macro is **open source**. You can inspect the [main script](Main.ahk), the [supporting code](lib/), and the [original project](https://github.com/DarksenDev/tds-macro). It is built with AutoHotkey, a Windows scripting language often used for legitimate keyboard, mouse and interface automation.
+Ultimate Macro's current source is **available for inspection and private modification under a restricted license**. You can inspect the [main script](Main.ahk), the [supporting code](lib/), and the [original project](https://github.com/DarksenDev/tds-macro). Historical GPL releases and third-party components retain their licenses. It is built with AutoHotkey, a Windows scripting language often used for legitimate keyboard, mouse and interface automation.
 
 **Open source does not guarantee that every downloaded file is harmless.** There is no meaningful way to promise that any software is “100% virus-free” simply from its README. Download official builds, keep Windows security protections enabled, and check a file if a security product flags it.
 
@@ -137,9 +137,10 @@ Thanks to everyone sharing strategies, reporting bugs and helping new members in
 
 [Original repository](https://github.com/DarksenDev/tds-macro) · [Support Darksen](https://www.donationalerts.com/r/darksen1)
 
-## Open source & community
+## Source availability & community
 
-- **License:** [GNU General Public License v3.0](LICENSE).
+- **Current first-party license:** [Ultimate Macro Personal-Use Source-Available License](LICENSE): personal use, inspection and private edits/forks allowed; resale and public redistribution restricted, subject to the GitHub platform exception. Not an OSI open-source license.
+- **Earlier releases and dependencies:** existing licenses remain in force; [historical GPL text](COPYING-GPL-3.0.txt). This change does not revoke previous GPL permissions or relicense third-party components.
 - **Source code:** [This repository](https://github.com/UltimateMacro/Ultimate-Macro-New-Era).
 - **Updates:** [GitHub releases](https://github.com/UltimateMacro/Ultimate-Macro-New-Era/releases).
 - **Documentation:** [Wiki](https://ultmacro.xyz/wiki/).
