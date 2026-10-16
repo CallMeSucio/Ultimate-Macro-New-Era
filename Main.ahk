@@ -12,6 +12,9 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
+global StateFile := A_AppData "\Ultimate_Macro\state.ini"
+global RuntimeStopReady := false, StopRequestedDuringStartup := false
+
 SetWorkingDir(A_ScriptDir)
 CoordMode("Mouse", "Client")
 CoordMode("Pixel", "Client")
@@ -23,10 +26,36 @@ SetTitleMatchMode(1)
 IsSet(OCR)
 IsSet(JSON)
 
-if (RegExMatch(A_ScriptDir, "i)\.(zip|rar)")) {
+; This early check handles archive tools that expose a path containing .zip/.rar/.7z.
+; A Windows ZIP viewer may instead extract only Main.ahk to an ordinary temp path.
+; For that case, the tiny Ultimate Macro.cmd is the reliable entry point:
+; #Include directives are processed before any runtime checks in this script.
+if (RegExMatch(A_ScriptDir, "i)\.(zip|rar|7z)(?:[\\/]|$)")) {
     MsgBox(
-        "You are attempting to run the script from a ZIP file.`n`nPlease Extract/Unzip the file first, then run the script in the extracted folder.",
-        "Running From ZIP", 0x10)
+        "Ultimate Macro cannot run inside a compressed archive.`n`n"
+        "1. Right-click the ZIP and choose Extract All.`n"
+        "2. Open the extracted folder (with Resources, lib and submacros).`n"
+        "3. Open Ultimate Macro.cmd, or run Main.ahk there.`n`n"
+        "Do not drag just Main.ahk out of the ZIP.",
+        "Extract Ultimate Macro First", "Icon!")
+    ExitApp()
+}
+
+; A partially extracted folder may still have enough AHK includes to load.
+; Catch missing non-AHK resources before launching Roblox or writing settings.
+requiredPackageFiles := ["Resources\ready_gs.png", "lib\ImageSearch\image_search.dll",
+    "submacros\AutoHotkey64.exe", "submacros\safe_update.ps1",
+    "discord-gateway\worker.mjs"]
+missingPackageFiles := []
+for relativeFile in requiredPackageFiles {
+    if !FileExist(A_ScriptDir "\" relativeFile)
+        missingPackageFiles.Push(relativeFile)
+}
+if missingPackageFiles.Length {
+    exampleFile := missingPackageFiles[1]
+    MsgBox("This folder is missing parts of Ultimate Macro (for example: " exampleFile ").`n`n"
+        "Extract the ENTIRE ZIP into a normal folder, then run Ultimate Macro.cmd.`n`n"
+        "Nothing was changed.", "Incomplete Ultimate Macro Folder", "Iconx")
     ExitApp()
 }
 
@@ -52,9 +81,19 @@ if (A_PtrSize == 4) {
 #Include submacros\updater.ahk
 #Include *i lib\Profiles.ahk
 #Include lib\Discord.ahk
+#Include lib\DiscordGateway.ahk
 #Include *i lib\DiscordCommands.ahk
 #Include lib\OfficialRemote.ahk
 #Include lib\RuntimeLog.ahk
+#Include lib\ShardPickup136.ahk
+#Include lib\SolarNight136.ahk
+#Include lib\AutomatedLogs.ahk
+#Include lib\TurboPotato136.ahk
+#Include lib\WelcomeSetup136.ahk
+#Include lib\SessionHistory136.ahk
+#Include lib\SmartAlerts136.ahk
+#Include lib\PlacementReview136.ahk
+#Include lib\RemoteControl136.ahk
 #Include lib\auto_settings.ahk
 
 BootstrapPinnedSourceDependencies() {
@@ -76,8 +115,16 @@ BootstrapPinnedSourceDependencies() {
 command_buffer := []
 global BotStrategyChoices := []
 global BotStrategyChoiceTime := 0
+global BotSeenCommandIDs := Map()
+global BotCommandCooldowns := Map()
+global BotActiveReplyID := 0
+global BotActiveInteraction := 0
+global BotInteractionReplied := false
+global BotConnectionNoticeSent := false
+global BotConnectionNoticeNextTry := 0
+global BotCommandPollMs := 3000
 
-ver := "1.3.5"
+ver := "1.3.6-b2-hotfix4-local"
 
 RuntimeLogInstall("Main", ver)
 
@@ -105,11 +152,12 @@ OnExit(HandleExit)
 OnMessage(0x84, DebugOverlayHitTest)
 
 global AppDataOpt := A_AppData "\Ultimate_Macro\Options"
+global BotGatewayDir := AppDataOpt "\Discord-Gateway"
+global BotGatewayStatusFile := BotGatewayDir "\status.json"
 global SettingsFile := AppDataOpt "\Settings.tds"
 global BotSettings := AppDataOpt "\Discord-Bot-Settings.ini"
 global RecordingsDir := A_AppData "\Ultimate_Macro\Recordings"
 global ProfilesDir := A_AppData "\Ultimate_Macro\Profiles"
-global StateFile := A_AppData "\Ultimate_Macro\state.ini"
 
 global StratsDir := A_WorkingDir "\Resources\Strats"
 
@@ -143,6 +191,7 @@ if !DirExist(ProfilesDir)
     DirCreate(ProfilesDir)
 
 global VipLink := IniRead(SettingsFile, "Options", "VipLink", "")
+global LaunchOnWindowsStartup := IniRead(SettingsFile, "Options", "LaunchOnWindowsStartup", 0)
 global UseVipServer := IniRead(SettingsFile, "Options", "UseVipServer", "0")
 global AlwaysOnTop := IniRead(SettingsFile, "Options", "AlwaysOnTop", 0)
 
@@ -152,21 +201,29 @@ global WebhookLink := IniRead(SettingsFile, "Webhook", "Link", "")
 global WebhookLink2 := IniRead(SettingsFile, "Webhook", "Link2", "")
 global WebhookEnabled := IniRead(SettingsFile, "Webhook", "Enabled", 0)
 global PotatoMode := IniRead(SettingsFile, "Options", "PotatoMode", 0)
+TurboInit136(SettingsFile)
 global SendCurrenciesEnabled := IniRead(SettingsFile, "Webhook", "SendCurrencies", "1")
 global WebhookDebugLogs := IniRead(SettingsFile, "Webhook", "WebhookDebugLogs", "1")
 global WebhookScreenshots := IniRead(SettingsFile, "Webhook", "WebhookScreenshots", "1")
 global WebhookTriumphScreenshots := IniRead(SettingsFile, "Webhook", "WebhookTriumphScreenshots", 1)
 global WebhookSepatateTriumphScreenshots := IniRead(SettingsFile, "Webhook", "WebhookSepatateTriumphScreenshots", 0)
-global BotToken := IniRead(BotSettings, "Token", "BotToken", "")
+global BotToken := Discord.LoadProtectedToken(BotSettings)
 global BotEnabled := IniRead(BotSettings, "Settings", "Enabled", 0)
-global ChannelID := IniRead(BotSettings, "Settings", "Channel", "")
-global UserID := IniRead(BotSettings, "Settings", "UserID", "")
-global BotPrefix := IniRead(BotSettings, "Settings", "Prefix", "!")
-global AutoEquip := IniRead(SettingsFile, "Options", "AutoEquip", 0)
+global ChannelID := Trim(IniRead(BotSettings, "Settings", "Channel", ""))
+global UserID := Trim(IniRead(BotSettings, "Settings", "UserID", ""))
+global BotPrefix := Trim(IniRead(BotSettings, "Settings", "Prefix", "!"))
+global GatewayEnabled := 1
+global BotGatewayPID := 0
+global BotGatewayFingerprint := ""
+if (StrLen(BotPrefix) != 1 || RegExMatch(BotPrefix, "[A-Za-z0-9\s]")) {
+    BotPrefix := "!"
+    IniWrite(BotPrefix, BotSettings, "Settings", "Prefix")
+}
 global AutoConfigureSettings := IniRead(SettingsFile, "Options", "AutoConfigureSettings", 0)
 global UseRestartBtn := IniRead(SettingsFile, "Options", "UseRestartBtn", "1")
 global UsePlayAgainBtn := IniRead(SettingsFile, "Options", "UsePlayAgainBtn", "1")
 global RotateStrategies := IniRead(SettingsFile, "Options", "RotateStrategies", 0)
+global AutoEquip := IniRead(SettingsFile, "Options", "AutoEquip", 0)
 global CheckTheMap := IniRead(SettingsFile, "Options", "CheckTheMap", 1)
 global UseNumbersForHotbar := IniRead(SettingsFile, "Options", "UseNumbers", 1)
 global UseHForUpgrade := IniRead(SettingsFile, "Options", "UseHotkeyForUpgrade", 1)
@@ -264,14 +321,20 @@ global Commander := false, AutoSkip := "ON", AbilitySpam := "ON"
 global SpecialMaps := ["Simplicity", "Cataclysm"]
 
 global MoveEnabled := false, MoveDirection := "W", MoveDuration := 750
+global AutoCollectShards := false, ShardPickupBusy136 := false
+global EventLoadout136 := "Your Loadout", SolarNightLobbyConfirmed136 := false
 global unfocusX := 150, unfocusY := 200
 global Towers := Map(), RecordedSteps := [], Recording := false, RunningStrategy := false
+global StrategyPaused := false, StrategyPauseStartedAt := 0
+global ActiveRuntimeTimers := Map(), PausedHeldInputs := []
+global MapOverrideConfirmed136 := false
 global RecordingWidth := 0, RecordingHeight := 0
 global RecordedTowerIds := Map()
 global modifiers := ""
 global LastOpenedTowerID := ""
 global IsRestarting := false
 global RestartLock := false
+global RecoveryCooldownPending := false
 global PendingSettingSaves := Map()
 global PartyInviteBusy := false
 
@@ -666,7 +729,6 @@ SaveOption(key, value) {
 DelayDefaults() {
     static defaults := Map(
         "WalkStep", 700,
-        "TowerMenu", 800,
         "MapMenu", 500,
         "SearchBox", 150,
         "SearchList", 500,
@@ -848,12 +910,14 @@ IsFontAvailable(faceName) {
     return (StrLower(actualFace) = StrLower(faceName))
 }
 
-autoRun := IniRead(StateFile, "State", "Running", 0)
+RuntimeStopReady := true
+autoRun := StopRequestedDuringStartup ? 0 : IniRead(StateFile, "State", "Running", 0)
+placementInterruptedNotice136 := BlockAutoRunOnPendingPlacement136(&autoRun)
 autoStrat := IniRead(StateFile, "State", "Strategy", "")
 savedStartTime := IniRead(StateFile, "State", "StartTime", 0)
 
-if (BotEnabled && ChannelID != "" && UserID != "") {
-    SetTimer(ProcessCommands, 7500, 1)
+if (BotEnabled && BotToken != "" && Discord.IsValidSnowflake(ChannelID) && Discord.IsValidSnowflake(UserID)) {
+    SetTimer(ProcessCommands, BotCommandPollMs, 1)
 }
 
 if (savedStartTime != 0)
@@ -865,8 +929,8 @@ if (autoRun = 1 && autoStrat != "" && FileExist(autoStrat)) {
     ActivateRoblox()
     if !RunStrategy() {
         if (RunningStrategy) {
-            RuntimeLogError("strategy_lifecycle_failed", "Strategy lifecycle ended before completing its transition")
-            StopStrategy()
+            RuntimeLogWarn("strategy_lifecycle_recovery", "Strategy phase failed; preserving running state and recovering")
+            RecoverRuntimeFailure("strategy_lifecycle")
         }
     }
 } else {
@@ -881,13 +945,15 @@ if (autoRun = 1 && autoStrat != "" && FileExist(autoStrat)) {
         if ProcessExist(A_LoopField) {
             MsgBox("Conflicting program detected:`n" A_LoopField "`n`nFor this script to work properly, please close all Roblox multi-client utilities.`nPlease close them and try again.",
                 "Error", 48)
-            ExitApp()
+            ; UI can stay open; the user may close a conflicting app and start again.
+            break
         }
     }
 }
 
 global MainGui := Gui("-Caption +Border +LastFound")
 MainGui.BackColor := "121212"
+global RequiredTowersPopupGui := 0
 
 global SystemHwnds := Map()
 
@@ -993,7 +1059,7 @@ RegisterHoverEffect(Tab1_Btn3)
 RegisterHoverEffect(Tab1_Btn4)
 
 MainGui.SetFont("s9 w400 cFFFFFF")
-global RotateStrategiesCtrl := MainGui.Add("Checkbox", "x30 y192 w140 h22 vRotateStrategies Checked" RotateStrategies,
+global RotateStrategiesCtrl := MainGui.Add("Checkbox", "x30 y" (RotateStrategies ? 192 : 160) " w140 h22 vRotateStrategies Checked" RotateStrategies,
     "Strategy Rotation")
 RotateStrategiesCtrl.OnEvent("Click", EnableStratRotation)
 
@@ -1017,22 +1083,24 @@ SwapUnitCtrl.OnEvent("Change", (*) => (
     SaveOption("SwapUnit", SwapUnit)
 ))
 
-MainGui.SetFont("s9 w400 cFFFFFF")
-global AutoEquipCtrl := MainGui.Add("Checkbox", "x30 y220 w140 h22 vAutoEquip Checked" AutoEquip, "Auto Equip Towers")
+global AutoEquipCtrl := MainGui.Add("Checkbox", "x" (RotateStrategies ? 400 : 180) " y" (RotateStrategies ? 192 : 160) " w190 h22 vAutoEquip Checked" AutoEquip,
+    "Auto Equip Towers")
 AutoEquipCtrl.OnEvent("Click", EnableAutoEquip)
+RegisterHelpTip(AutoEquipCtrl,
+    "Known issue: Auto Equip may select the wrong tower or Golden/Regular variant. Verify the hotbar before gameplay. Manual equipment is safer.")
 
-global AutoConfigCtrl := MainGui.Add("Checkbox", "x175 y220 w212 h22 vAutoConfigureSettings Checked" AutoConfigureSettings,
+global AutoConfigCtrl := MainGui.Add("Checkbox", "x" (RotateStrategies ? 175 : 400) " y" (RotateStrategies ? 220 : 160) " w212 h22 vAutoConfigureSettings Checked" AutoConfigureSettings,
     "Auto Configure Settings")
 AutoConfigCtrl.OnEvent("Click", EnableAutoConfig)
 
 MainGui.SetFont("s10 w400 c3A86FF", UIFont())
-global Tab1_Section2 := MainGui.Add("Text", "x30 y252 w200 h24 0x200", "Strategies")
-global Tab1_Line2 := MainGui.Add("Progress", "x30 y280 w640 h1 Background333333", 0)
+global Tab1_Section2 := MainGui.Add("Text", "x30 y" (RotateStrategies ? 252 : 192) " w200 h24 0x200", "Strategies")
+global Tab1_Line2 := MainGui.Add("Progress", "x30 y" (RotateStrategies ? 280 : 220) " w640 h1 Background333333", 0)
 
 MainGui.SetFont("s10 w400 c3A86FF", UIFont())
-global BtnCommStrats := MainGui.Add("Text", "x424 y252 w120 h24 Center Background222222 +Border 0x200", "Community")
+global BtnCommStrats := MainGui.Add("Text", "x424 y" (RotateStrategies ? 252 : 192) " w120 h24 Center Background222222 +Border 0x200", "Community")
 MainGui.SetFont("s10 w400 cFFFFFF", UIFont())
-global BtnMyStrats := MainGui.Add("Text", "x550 y252 w120 h24 Center Background0e0e0f +Border 0x200", "My Strats")
+global BtnMyStrats := MainGui.Add("Text", "x550 y" (RotateStrategies ? 252 : 192) " w120 h24 Center Background0e0e0f +Border 0x200", "My Strats")
 
 BtnCommStrats.OnEvent("Click", (*) => SwitchStrategiesTab("Community"))
 BtnMyStrats.OnEvent("Click", (*) => SwitchStrategiesTab("MyStrats"))
@@ -1208,9 +1276,9 @@ if (needUpdate) {
 }
 
 global FrameX := 30
-global FrameY := 290
+global FrameY := RotateStrategies ? 290 : 230
 global FrameW := 640
-global FrameH := 195
+global FrameH := RotateStrategies ? 195 : 255
 global ContentH := 400
 global CurrentScrollPos := 0
 global ScrollDragging := false
@@ -1578,8 +1646,9 @@ RenderStrategies(mode := "Community") {
 OnMessage(0x0115, OnScroll)
 OnMessage(0x020A, OnMouseWheel)
 
-global Tab1_Start := MakeActionButton(MainGui, 30, 500, 310, 40, "Start  (F1)", StartStrategy, "start")
-global Tab1_Stop := MakeActionButton(MainGui, 360, 500, 310, 40, "Stop  (F2)", StopStrategy, "stop")
+global Tab1_Start := MakeActionButton(MainGui, 30, 500, 200, 40, "Start  (F1)", StartStrategy, "start")
+global Tab1_Pause := MakeActionButton(MainGui, 250, 500, 200, 40, "Pause / Resume  (F2)", ToggleStrategyPause, "neutral")
+global Tab1_Stop := MakeActionButton(MainGui, 470, 500, 200, 40, "Stop  (F3)", StopStrategy, "stop")
 
 global CreateView := "Choose"
 
@@ -1621,7 +1690,7 @@ global RecMapsD := MainGui.Add("ComboBox", "x100 y131 w240 Hidden vRecMaps", [
     "Northern Lights", "Outskirts Commune", "Pier Pressure", "Pizza Party", "Polluted Wasteland II",
     "Portland", "Retro Crossroads", "Retro Lighthouse", "Retro Rocket Arena", "Retro Stained Temple",
     "Retro The Heights", "Retro Zone", "Rocket Arena", "Ruby Escort", "Sacred Mountains",
-    "Sky Islands", "Simplicity", "Space City", "Spring Fever", "Stained Temple", "Sugar Rush",
+    "Sky Islands", "Simplicity", "Sorrowful Remains", "Space City", "Spring Fever", "Stained Temple", "Sugar Rush",
     "The Heavens", "The Heights", "Toyboard", "Tropical Industries", "Tropical Isles", "U-Turn",
     "Unknown Garden", "Winter Abyss", "Winter Bridges", "Winter Stronghold", "Wrecked Battlefield",
     "Wrecked Battlefield II", "Wretched Front"
@@ -1631,7 +1700,7 @@ MainGui.SetFont("s9 w400 cAAAAAA")
 global Tab2_Lbl2 := MainGui.Add("Text", "x30 y162 w66 h22 0x200 Hidden BackgroundTrans", "Mode:")
 MainGui.SetFont("s9 w400 c000000")
 global RecDifficultyChoices := ["Easy", "Casual", "Intermediate", "Molten", "Fallen", "Frost",
-    "Hardcore", "Voidcore", "Arcade", "Pizza Party", "Badlands II", "Polluted Wasteland II"]
+    "Hardcore", "Voidcore", "Arcade", "Pizza Party", "Badlands II", "Polluted Wasteland II", "Night 1 Easy", "Night 1 Hard"]
 global RecDiffCtrl := MainGui.Add("ComboBox", "x100 y161 w240 Hidden vRecDifficulty", RecDifficultyChoices)
 
 MainGui.SetFont("s9 w400 cAAAAAA")
@@ -1672,6 +1741,11 @@ global RecAutoDropCtrl := MainGui.Add("Checkbox", "x360 y260 w310 h22 Hidden vRe
 global Tab2_Line3 := MainGui.Add("Progress", "x360 y292 w310 h1 Hidden Background333333", 0)
 global RecAutoSkipCtrl := MainGui.Add("Checkbox", "x360 y304 w310 h22 Hidden vRecAutoSkip", "Auto Skip Waves")
 global RecAbilitySpamCtrl := MainGui.Add("Checkbox", "x360 y330 w310 h22 Hidden vRecAbilitySpam", "Abilities Spam")
+MainGui.SetFont("s9 w400 cAAAAAA", UIFont())
+global RecEventLoadoutLabel := MainGui.Add("Text", "x360 y361 w100 h22 Hidden BackgroundTrans", "Night I loadout:")
+MainGui.SetFont("s9 w400 c000000", UIFont())
+global RecEventLoadoutCtrl := MainGui.Add("DropDownList", "x465 y356 w205 Hidden Choose1 vRecEventLoadout",
+    ["Your Loadout", "Tactician", "Experimental", "Crowd Control"])
 RecAutoSkipCtrl.OnEvent("Click", RecordToggleAutoskip)
 
 global Tab2_Line4 := MainGui.Add("Progress", "x30 y396 w640 h1 Hidden Background333333", 0)
@@ -1687,6 +1761,8 @@ MainGui.SetFont("s9 w400 cAAAAAA")
 global Tab2_Txt4 := MainGui.Add("Text", "x262 y408 w92 h22 0x200 Hidden BackgroundTrans", "Duration (ms):")
 MainGui.SetFont("s9 w400 c000000")
 global RecMoveDurCtrl := MainGui.Add("Edit", "x358 y408 w60 h22 Hidden vRecMoveDuration", 1000)
+MainGui.SetFont("s9 w400 cFFFFFF", UIFont())
+global RecCollectShardsCtrl := MainGui.Add("Checkbox", "x440 y408 w230 h22 Hidden vRecCollectShards", "Collect event drops")
 
 MainGui.SetFont("s8 w400 c7E848E", UIFont())
 global Tab2_Info := MainGui.Add("Link", "x30 y442 w640 h44 Hidden", "
@@ -1825,7 +1901,7 @@ DiscordWebhookTab.Push(Tab4_Line2, Tab4_Line5, Tab4_Btn1, Tab4_Info, Tab4_Lbl1, 
 MainGui.SetFont("s9 w400 cAAAAAA")
 global bot_token_text := MainGui.Add("Text", "x30 y138 w300 h20 Hidden BackgroundTrans", "Bot Token:")
 MainGui.SetFont("s9 w400 c000000")
-global BotTokenCtrl := MainGui.Add("Edit", "x30 y160 w640 h24 Hidden vBotToken", BotToken)
+global BotTokenCtrl := MainGui.Add("Edit", "x30 y160 w640 h24 Hidden Password vBotToken", BotToken)
 SetEditPlaceholder(BotTokenCtrl, "MTUzNz...")
 
 MainGui.SetFont("s9 w400 cFFFFFF")
@@ -1849,19 +1925,24 @@ SetEditPlaceholder(WebhookUserIDCtrl2, "Your own Discord user ID, for example 28
 global Tab4_Line3 := MainGui.Add("Progress", "x30 y326 w640 h1 Hidden Background333333", 0)
 
 MainGui.SetFont("s9 w400 c7E848E", UIFont())
-global Tab4_Info_Bot := MainGui.Add("Link", "x30 y338 w640 h140 Hidden", "
+global Tab4_Info_Bot := MainGui.Add("Link", "x30 y338 w640 h155 Hidden", "
 (
     A personal Discord bot works as a remote control for your macro: start or stop it from your phone, request screenshots, read statistics and more.
-    
+
+    Prefix commands need Message Content Intent in Developer Portal > Bot. The bot also needs View Channel, Send Messages and Read Message History in the target channel.
+
+    Native slash commands are enabled automatically and register in every server the bot is in. Node.js 22 or newer must be installed.
+
     Setup tutorial: <a href=`"https://youtu.be/eAQ5Hm7fQu4`">youtu.be/eAQ5Hm7fQu4</a>
-    
-    The command prefix must be a single non-alphanumeric character, such as ! . or -
+
+    The command prefix must be one non-alphanumeric character, such as !, . or -.
 )")
 
 global Tab4_bot_Btn1 := MakeActionButton(MainGui, 30, 500, 640, 40, "Test Bot", TestBot, "accent", true)
 
 DiscordBotTab.Push(Tab4_Line2, BotTokenCtrl, BotEnabledCtrl, Tab4_bot_Btn1,
-    bot_token_text, bot_prefix_text, BotPrefixCtrl, WebhookUserIDCtrl2, ChannelIDCtrl, channel_id_text, userid_text,
+    bot_token_text, bot_prefix_text, BotPrefixCtrl, WebhookUserIDCtrl2, ChannelIDCtrl,
+    channel_id_text, userid_text,
     Tab4_Line3, Tab4_Info_Bot)
 
 MainGui.SetFont("s15 w600 cFFFFFF", UIFont())
@@ -2005,43 +2086,51 @@ RegisterHelpTip(Tab5_HelpVan, "SWAT Van: set this to your TDS Enforcer SWAT Van 
 SettingsPanel.SetFont("s8 w400 c7E848E", UIFont())
 global Tab5_TDSKeybindStatus := SettingsPanel.Add("Text", "x0 y173 w304 h30 Background121212", "")
 
+SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
+global WindowsStartupCtrl := SettingsPanel.Add("Checkbox", "x0 y207 w264 h22 -Theme", " Launch on Windows startup")
+startupState136 := ReadWindowsStartupState136()
+WindowsStartupCtrl.Value := startupState136.Enabled ? 1 : 0
+SettingsPanel.SetFont("s8 w400 c7E848E", UIFont())
+global WindowsStartupStatusCtrl := SettingsPanel.Add("Text", "x0 y230 w304 h28 BackgroundTrans",
+    WindowsStartupStatusText136())
+
 SettingsPanel.SetFont("s10 w400 c3A86FF", UIFont())
 global Tab5_Section2 := SettingsPanel.Add("Text", "x330 y8 w290 h22 BackgroundTrans", "Macro Settings")
 global Tab5_Line2 := SettingsPanel.Add("Progress", "x330 y31 w296 h1 Background333333", 0)
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
-global UseUpgradeHCtrl := SettingsPanel.Add("Checkbox", "x330 y42 w264 h22", " Use Hotkeys for Upgrading")
+global UseUpgradeHCtrl := SettingsPanel.Add("Checkbox", "x330 y42 w264 h22 -Theme", " Use Hotkeys for Upgrading")
 UseUpgradeHCtrl.Value := (UseHForUpgrade = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
 global Tab5_Help6 := SettingsPanel.Add("Text", "x600 y42 w18 h22 0x200 Center", "?")
 RegisterHelpTip(Tab5_Help6, "Use Hotkeys for Upgrading: the macro presses the TDS upgrade keybind instead of clicking the upgrade panel.`n`nRecommended: ON.")
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
-global UseRestartBtnCtrl := SettingsPanel.Add("Checkbox", "x330 y68 w264 h22", " Click Restart button")
+global UseRestartBtnCtrl := SettingsPanel.Add("Checkbox", "x330 y68 w264 h22 -Theme", " Click Restart button")
 UseRestartBtnCtrl.Value := (UseRestartBtn = "1" || UseRestartBtn = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
 global Tab5_Help4 := SettingsPanel.Add("Text", "x600 y68 w18 h22 0x200 Center", "?")
 RegisterHelpTip(Tab5_Help4, "Click Restart button: when ON, the macro presses the Restart button after a loss.`n`nTurn it OFF if you use a winning strategy and the macro sometimes ends up on the wrong map.")
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
-global UsePlayAgainBtnCtrl := SettingsPanel.Add("Checkbox", "x330 y94 w264 h22", " Click Play Again button")
+global UsePlayAgainBtnCtrl := SettingsPanel.Add("Checkbox", "x330 y94 w264 h22 -Theme", " Click Play Again button")
 UsePlayAgainBtnCtrl.Value := (UsePlayAgainBtn = "1" || UsePlayAgainBtn = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
 global Tab5_Help5 := SettingsPanel.Add("Text", "x600 y94 w18 h22 0x200 Center", "?")
 RegisterHelpTip(Tab5_Help5, "Click Play Again button: when ON, the macro presses the Play Again button after a win.")
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
-global CheckTheMapCtrl := SettingsPanel.Add("Checkbox", "x330 y120 w264 h22", " Check the map")
+global CheckTheMapCtrl := SettingsPanel.Add("Checkbox", "x330 y120 w264 h22 -Theme", " Extra special-map check")
 CheckTheMapCtrl.Value := (CheckTheMap = "1" || CheckTheMap = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
 global Tab5_Help7 := SettingsPanel.Add("Text", "x600 y120 w18 h22 0x200 Center", "?")
-RegisterHelpTip(Tab5_Help7, "Check the map: after joining, the macro confirms it is on the map your strategy expects and reloads if it is not.`n`nRecommended: ON.")
+RegisterHelpTip(Tab5_Help7, "Standard maps with an installed image reference are always verified before Ready. This option enables the additional Simplicity position check. Maps without an image reference rely on a confirmed map-selection flow.")
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
-global UseNumbersForHotbarCtrl := SettingsPanel.Add("Checkbox", "x330 y146 w290 h22", " Use Numbers for Hotbar")
+global UseNumbersForHotbarCtrl := SettingsPanel.Add("Checkbox", "x330 y146 w290 h22 -Theme", " Use Numbers for Hotbar")
 UseNumbersForHotbarCtrl.Value := (UseNumbersForHotbar = "1" || UseNumbersForHotbar = 1)
 
-global CollectPlaytimeRewardsCtrl := SettingsPanel.Add("Checkbox", "x330 y172 w290 h22", " Collect playtime rewards")
+global CollectPlaytimeRewardsCtrl := SettingsPanel.Add("Checkbox", "x330 y172 w290 h22 -Theme", " Collect playtime rewards")
 CollectPlaytimeRewardsCtrl.Value := (CollectPlaytimeRewards = "1" || CollectPlaytimeRewards = 1)
 
 SettingsPanel.SetFont("s9 w400 cAAAAAA")
@@ -2118,6 +2207,10 @@ AlwaysOnTopCtrl.Value := (AlwaysOnTop = "1" || AlwaysOnTop = 1)
 global DebugConsoleCtrl := SettingsPanel.Add("Checkbox", "x214 y529 w200 h22", " On-Screen Logs")
 DebugConsoleCtrl.Value := (DebugConsole = "1" || DebugConsole = 1)
 
+global QADiagnosticsCtrl := SettingsPanel.Add("Checkbox", "x428 y529 w198 h22 -Theme", " QA Diagnostics")
+QADiagnosticsCtrl.Value := AutoLogsAllowed(SettingsFile)
+RegisterHelpTip(QADiagnosticsCtrl, "With your permission, save sanitized run diagnostics locally and attempt upload to the developer team. Upload requires a live API and restricted tester access. You can disable this at any time.")
+
 global PotatoModeCtrl := SettingsPanel.Add("Checkbox", "x0 y557 w104 h22", " Potato Mode")
 PotatoModeCtrl.Value := (PotatoMode = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
@@ -2125,11 +2218,18 @@ global Tab5_Help21 := SettingsPanel.Add("Text", "x108 y557 w18 h22 0x200 Center"
 RegisterHelpTip(Tab5_Help21, "Potato Mode: adds extra waiting time between actions.`n`nTurn it on if the macro behaves inconsistently or your game lags.")
 
 SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
+global TurboPotatoCtrl := SettingsPanel.Add("Checkbox", "x350 y557 w155 h22", " Turbo Potato")
+TurboPotatoCtrl.Value := IniRead(SettingsFile, "Review", "TurboPotato", "0") = "1"
+SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
+global Tab5_TurboHelp136 := SettingsPanel.Add("Text", "x505 y557 w18 h22 0x200 Center", "?")
+RegisterHelpTip(Tab5_TurboHelp136, "Beta: only works with Potato Mode on. Adjusts placement delays after confirmed tower UI responses. Does not skip confirmation or upgrade checks.")
+
+SettingsPanel.SetFont("s9 w400 cFFFFFF", UIFont())
 global LegacyModeCtrl := SettingsPanel.Add("Checkbox", "x214 y557 w100 h22", " Legacy Mode")
 LegacyModeCtrl.Value := (LegacyMode = "1" || LegacyMode = 1)
 SettingsPanel.SetFont("s9 w400 c7E848E", UIFont())
 global Tab5_HelpLegacy := SettingsPanel.Add("Text", "x318 y557 w18 h22 0x200 Center", "?")
-RegisterHelpTip(Tab5_HelpLegacy, "Legacy Mode: changes how image detection works and only applies at 1920x1080.`n`nAuto Equip and tower targeting do not work in this mode. The macro restarts when you change it.")
+RegisterHelpTip(Tab5_HelpLegacy, "Legacy Mode: changes how image detection works and only applies at 1920x1080.`n`nTower targeting does not work in this mode. The macro restarts when you change it.")
 
 SettingsPanel.SetFont("s9 w400 cAAAAAA")
 global MouseSpeedLbl := SettingsPanel.Add("Text", "x0 y589 w78 h22 0x200 BackgroundTrans", "Mouse Speed:")
@@ -2153,10 +2253,6 @@ AddDelayField(0, 625, "Walk Step:", "WalkStep",
     "Walk Step: how long the macro waits after each lobby walking step before it walks again or looks for the next prompt.`n`n"
     "The character keeps sliding for a moment after the movement key is released. Lowering this requires a fast internet connection "
     "- if it is too low the macro walks from the wrong spot and the map or E prompt is never detected.")
-AddDelayField(214, 625, "Tower Menu:", "TowerMenu",
-    "Tower Menu: how long the macro waits after opening the tower (Items) menu before it uses the search bar.`n`n"
-    "The menu animates open, so searching too early types into nothing. Lowering this requires faster internet and game load times; "
-    "if the menu hasn't fully loaded in time, Auto Equip stops finding the search bar and reloads.")
 AddDelayField(428, 625, "Map Menu:", "MapMenu",
     "Map Menu: how long the macro waits after opening the map selection menu before it uses the search bar.`n`n"
     "Lowering this requires faster internet and game load times. If it is too low the macro clicks before the menu has loaded and map selection fails.")
@@ -2225,29 +2321,40 @@ MainGui.SetFont("s11 w400 cFFFFFF", UIFont())
 global Credit_Content := MainGui.Add("Edit",
     "x80 y150 w530 h200 Multi ReadOnly -TabStop +VScroll -Wrap -E0x200 Background111111 Hidden", "
     (
-        Started on March 30, 2026. Built in AutoHotkey v2.
+        Ultimate Macro is a free, open-source Windows tool for Roblox TDS.
+        Built with AutoHotkey v2.
         
-        Original Creator
+        Project origin
         • Darksen
+        The project is now maintained by the Ultimate Macro community.
         
-        Lead Developer
-        • pizzaroles24
+        Lead Developers
+        • Aiden
+        • Pizza
         
         Developers
-        • aiden
-        • banana.dev
-        • itzshovel
-        • kronoxxv
-        • salkann
-        • yoshi
-        • ziadod
+        • Sanjin
+        • Shovel
+        • O_zki
+        • Yoshi
         
-        QA
-        • frostzzz
+        Testers
+        • ElementalbombX
+        • ErrioT
+        • Ka_Demon
         • menz.7
-        • iammattthenpc
-        • nytli
-        • tristanm1ce
+        • Nytli
+        • tantan_bts12
+        • Tfuemum_xd
+        • vfxdraco
+        • Yoshi101
+
+        Community
+        Thanks to everyone sharing strategies, reporting bugs,
+        and helping new users.
+
+        Open source
+        Licensed under GNU GPL v3.0. See LICENSE and the project README on GitHub.
     )")
 
 EnableDarkScrollbar(Credit_Content)
@@ -2265,7 +2372,7 @@ global Credit_InfoBG := MainGui.Add("Progress", "x0 y366 w700 h44 Hidden Center 
 MainGui.SetFont("s12 norm w400 cFFFFFF", UIFont())
 global Credit_Info := MainGui.Add("Text", "x0 y366 w700 h44 BackgroundTrans 0x200 Center Hidden", "
 (
-    Special thanks to my Discord Community!
+    Thanks to everyone sharing strategies, reporting bugs, and helping new users!
 )")
 
 global Divider := MainGui.Add("Progress", "x0 y500 w700 h1 Hidden Background222222", 0)
@@ -2282,9 +2389,16 @@ global YoutubeImg := MainGui.Add("Picture", "x644 y524 w-1 h16 Hidden Background
 YoutubeImg.OnEvent("Click", YouTubeLink)
 
 MainGui.Title := "Ultimate Macro"
-MainGui.Show("w700 h565")
-
+if IniRead(SettingsFile, "Welcome", "Completed", 0) = 1
+    MainGui.Show("w700 h565")
+if (placementInterruptedNotice136 != "") {
+    try ModernMsgBox("Placement interrupted", placementInterruptedNotice136, "OK", "WARNING")
+    IniWrite(0, StateFile, "Recovery", "PlacementInterrupted")
+    IniWrite(0, StateFile, "Recovery", "PlacementPending")
+    placementInterruptedNotice136 := ""
+}
 OfficialRemoteInit()
+DiscordGatewayInit()
 
 if (AlwaysOnTop = 1) {
     MainGui.Opt("+AlwaysOnTop")
@@ -2314,6 +2428,11 @@ OnMessage(0x0202, OnAppMouseUp)
 OnMessage(0x0133, DarkInputCtlColor)
 OnMessage(0x0134, DarkInputCtlColor)
 OnMessage(0x8001, ToolWindowClosing)
+
+if IniRead(SettingsFile, "Welcome", "Completed", 0) != 1
+    WelcomeOpen136()
+else
+    SetTimer(WindowsStartupCheckOnLaunch136, -350)
 
 ControlClassName(hwnd) {
     if (!hwnd)
@@ -2370,7 +2489,8 @@ RemoveInitialFocus() {
 }
 
 ~F1:: StartStrategy(0, 0)
-~F2:: StopStrategy(0, 0)
+F2:: ToggleStrategyPause()
+F3:: StopStrategy(0, 0)
 
 SelectTab(ctrl, *) {
     global CurrentTab, TabCtrl, TabLine, HoverTab
@@ -2670,7 +2790,7 @@ ShowTabContent(tab) {
         for ctrl in [Tab1_Section1, Tab1_Line1, Tab1_Lbl1, Strategy1Ctrl, Tab1_Btn1, Tab1_Btn2,
             Tab1_Lbl2, Strategy2Ctrl, Tab1_Btn3, Tab1_Btn4, RotateStrategiesCtrl, AutoEquipCtrl, AutoConfigCtrl, Tab1_Section2,
             Tab1_Line2, BtnCommStrats, BtnMyStrats,
-            Tab1_Start, Tab1_Stop]
+            Tab1_Start, Tab1_Pause, Tab1_Stop]
             ShowControl(ctrl)
         EnableStratRotation()
         ShowChildGui()
@@ -2732,7 +2852,8 @@ CreateRecordControls() {
     return [Tab2_Lbl1, RecMapsD, Tab2_Lbl2, RecDiffCtrl, Tab2_Lbl4, RecTowersCtrl,
         Tab2_Lbl3, RecModifiersFrame, RecModifiersCtrl, Tab2_Info2, Tab2_Info1, Tab2_Line2, Tab2_Line3, Tab2_Line4,
         RecAutoChainCtrl, RecAutoCaravanCtrl, RecAutoDropCtrl, RecAutoSkipCtrl, RecAbilitySpamCtrl,
-        RecMoveCtrl, DIRECTIONTEXTCtrl, RecMoveDirCtrl, Tab2_Txt4, RecMoveDurCtrl, Tab2_Info,
+        RecEventLoadoutLabel, RecEventLoadoutCtrl,
+        RecMoveCtrl, DIRECTIONTEXTCtrl, RecMoveDirCtrl, Tab2_Txt4, RecMoveDurCtrl, RecCollectShardsCtrl, Tab2_Info,
         Tab2_BackBtn, Tab2_Btn1, Tab2_Btn2]
 }
 
@@ -3315,7 +3436,7 @@ AutoSaveLegacyMode(ctrl, *) {
         if (A_ScreenHeight != 1080 || A_ScreenWidth != 1920)
             MsgBox("WARNING! Legacy mode works only for 1920x1080!", "Warning", 0x1030)
         MsgBox(
-            "Changes how the image detection works. May not work for some people.`n`nWarning: some features - such as Auto Equip and Changing Tower Targeting - will not work with this mode!`n`nUltimate Macro will now restart to apply it.",
+            "Changes how the image detection works. May not work for some people.`n`nWarning: Changing Tower Targeting will not work with this mode!`n`nUltimate Macro will now restart to apply it.",
             "Legacy Mode", 0x1040)
     }
 
@@ -3324,10 +3445,35 @@ AutoSaveLegacyMode(ctrl, *) {
     Reload()
 }
 
+ToggleQADiagnostics136(ctrl, *) {
+    global SettingsFile
+    if ctrl.Value {
+        ; A previous No can only be reversed by explicitly asking again.
+        IniWrite("unset", SettingsFile, "AutomatedLogs", "Consent")
+        accepted := AutoLogsAskConsent(SettingsFile)
+        ctrl.Value := accepted ? 1 : 0
+    } else {
+        IniWrite("no", SettingsFile, "AutomatedLogs", "Consent")
+        IniWrite("api-v2", SettingsFile, "AutomatedLogs", "ConsentVersion")
+    }
+}
+
+ShowQAConsentOnStartup136() {
+    global SettingsFile, QADiagnosticsCtrl
+    accepted := AutoLogsAskConsent(SettingsFile)
+    QADiagnosticsCtrl.Value := accepted ? 1 : 0
+    if accepted {
+        cred1 := A_ScriptDir "\setup\AutomatedLogs-Access.ini"
+        cred2 := A_AppData "\Ultimate_Macro\Options\AutomatedLogs-Access.ini"
+        if !FileExist(cred1) && !FileExist(cred2)
+            RuntimeLogWarn("qa_upload_not_configured", "QA diagnostics enabled locally; missing tester upload credential")
+    }
+}
+
 WireSettingsAutoSave() {
     global UseHForUpgrade, UseRestartBtn, UsePlayAgainBtn, CheckTheMap, UseNumbersForHotbar
     global CollectPlaytimeRewards, DebugConsole, PotatoMode, DefaultMouseSpeed, MouseDelay, KeyDelay
-    global VipLink, UseVipServer, AlwaysOnTop
+    global VipLink, UseVipServer, AlwaysOnTop, WindowsStartupCtrl
 
     UseUpgradeHCtrl.OnEvent("Click", (c, *) => (
         UseHForUpgrade := c.Value,
@@ -3353,6 +3499,8 @@ WireSettingsAutoSave() {
         CollectPlaytimeRewards := c.Value,
         SaveOption("CollectPlaytimeRewards", CollectPlaytimeRewards)
     ))
+    QADiagnosticsCtrl.OnEvent("Click", ToggleQADiagnostics136)
+    WindowsStartupCtrl.OnEvent("Click", WindowsStartupPreferenceChange136)
 
     TimeScaleModeCtrl.OnEvent("Change", (c, *) => ApplyTimeScaleMode(c.Text))
     UpgradeDelayCtrl.OnEvent("Change", (*) => AutoSaveUpgradeDelay())
@@ -3372,7 +3520,12 @@ WireSettingsAutoSave() {
     ))
     PotatoModeCtrl.OnEvent("Click", (c, *) => (
         PotatoMode := c.Value,
-        SaveOption("PotatoMode", PotatoMode)
+        SaveOption("PotatoMode", PotatoMode),
+        TurboInit136(SettingsFile)
+    ))
+    TurboPotatoCtrl.OnEvent("Click", (c, *) => (
+        IniWrite(c.Value, SettingsFile, "Review", "TurboPotato"),
+        TurboInit136(SettingsFile)
     ))
 }
 
@@ -3395,7 +3548,7 @@ ResetSettingsToDefault(*) {
         "Options", Map("TimeScaleMode", "OFF", "UpgradeDelay", 200, "UseRestartBtn", 1, "UsePlayAgainBtn", 1,
             "CheckTheMap", 1, "UseNumbers", 1, "UseHotkeyForUpgrade", 1, "CollectPlaytimeRewards", 1,
             "PotatoMode", 0, "DebugConsole", 0, "DefaultMouseSpeed", 2, "MouseDelay", 10, "KeyDelay", 20,
-            "AlwaysOnTop", 0, "LegacyMode", 0)
+            "AlwaysOnTop", 0, "LegacyMode", 0, "LaunchOnWindowsStartup", 0)
     )
 
     for section, entries in defaults {
@@ -3405,6 +3558,8 @@ ResetSettingsToDefault(*) {
 
     for name, value in DelayDefaults()
         SaveSetting(SettingsFile, "Options", DelaySettingKey(name), value)
+
+    SetWindowsStartup136(false)
 
     ModernMsgBox("Settings reset",
         "Every setting on this page is back to its default.`n`nUltimate Macro will restart now to apply them.", "OK")
@@ -4054,7 +4209,7 @@ HoldLockedCheckbox(ctrl, *) {
 }
 
 EnableStratRotation(*) {
-    global RotateStrategies, SwapAmount, SwapUnit, AutoEquip
+    global RotateStrategies, SwapAmount, SwapUnit, AutoEquip, AutoEquipCtrl
 
     RotateStrategies := RotateStrategiesCtrl.Value
     IniWrite(RotateStrategies, SettingsFile, "Options", "RotateStrategies")
@@ -4067,11 +4222,12 @@ EnableStratRotation(*) {
     SwapAfterLbl.Visible := show
     SwapAmountCtrl.Visible := show
     SwapUnitCtrl.Visible := show
-
-    SetCheckboxLocked(AutoEquipCtrl, show, 1)
+    AutoEquipCtrl.Enabled := !show
 
     if (show) {
-        AutoEquip := 1
+        AutoEquipCtrl.Value := 1
+        v := MainGui.Submit(false)
+        AutoEquip := v.AutoEquip
         IniWrite(AutoEquip, SettingsFile, "Options", "AutoEquip")
         SwapAmount := SwapAmountCtrl.Text
         SwapUnit := SwapUnitCtrl.Text
@@ -4079,16 +4235,44 @@ EnableStratRotation(*) {
         IniWrite(SwapUnit, SettingsFile, "Options", "SwapUnit")
     }
 
+    ApplyStrategyTabLayout136(show)
     UpdateStrategyButtons()
 }
 
-EnableAutoEquip(ctrl, *) {
-    global AutoEquip
+ApplyStrategyTabLayout136(rotating) {
+    global MainGui, RotateStrategiesCtrl, AutoEquipCtrl, AutoConfigCtrl
+    global Tab1_Section2, Tab1_Line2, BtnCommStrats, BtnMyStrats
+    global FrameY, FrameH, ContentGui, CurrentTab, CurrentStratTabMode
 
-    if (HoldLockedCheckbox(ctrl))
-        return
+    compact := !rotating
+    rowY := compact ? 160 : 192
+    RotateStrategiesCtrl.Move(30, rowY)
+    AutoEquipCtrl.Move(compact ? 180 : 400, rowY)
+    AutoConfigCtrl.Move(compact ? 400 : 175, compact ? 160 : 220)
 
-    AutoEquip := ctrl.Value
+    sectionY := compact ? 192 : 252
+    Tab1_Section2.Move(30, sectionY)
+    Tab1_Line2.Move(30, sectionY + 28)
+    BtnCommStrats.Move(424, sectionY)
+    BtnMyStrats.Move(550, sectionY)
+
+    newFrameY := compact ? 230 : 290
+    newFrameH := compact ? 255 : 195
+    if (FrameY != newFrameY || FrameH != newFrameH) {
+        FrameY := newFrameY
+        FrameH := newFrameH
+        if (CurrentTab = "Tab1" && IsSet(ContentGui) && ContentGui && IsSet(CurrentStratTabMode))
+            RenderStrategies(CurrentStratTabMode)
+    }
+
+    ; Moving transparent parent controls leaves their old pixels behind unless the full tree repaints.
+    DllCall("RedrawWindow", "Ptr", MainGui.Hwnd, "Ptr", 0, "Ptr", 0, "UInt", 0x185)
+}
+
+EnableAutoEquip(*) {
+    global AutoEquip, AutoEquipCtrl, SettingsFile
+
+    AutoEquip := AutoEquipCtrl.Value ? 1 : 0
     IniWrite(AutoEquip, SettingsFile, "Options", "AutoEquip")
 }
 
@@ -4227,8 +4411,55 @@ QueueStrategyStart() {
     return ""
 }
 
+ShowRequiredTowersPopup136(requiredTowerList) {
+    global RequiredTowersPopupGui
+
+    HideRequiredTowersPopup136()
+    names := []
+    for name in StrSplit(requiredTowerList, ",") {
+        name := Trim(name)
+        if (name != "" && StrLower(name) != "none")
+            names.Push(name)
+    }
+    if !names.Length
+        return false
+
+    popup := Gui("-Caption +AlwaysOnTop +ToolWindow +E0x20 +Border")
+    popup.BackColor := "1B1D23"
+    popup.MarginX := 0
+    popup.MarginY := 0
+    popup.SetFont("s9 w700 cA78BFA", UIFont())
+    popup.Add("Text", "x16 y12 w368 h18 BackgroundTrans", "REQUIRED TOWERS")
+
+    popup.SetFont("s10 w500 cF3F4F6", UIFont())
+    body := popup.Add("Text", "x16 y36 w368 BackgroundTrans", Join(names, "  ·  "))
+    body.GetPos(, , , &bodyHeight)
+
+    footerY := 42 + bodyHeight + 7
+    popupHeight := footerY + 12
+    popupX := Max(12, A_ScreenWidth - 420)
+    popup.Show("NoActivate x" popupX " y28 w400 h" popupHeight)
+    RequiredTowersPopupGui := popup
+    SetTimer(HideRequiredTowersPopup136, -3000)
+    return true
+}
+
+HideRequiredTowersPopup136(*) {
+    global RequiredTowersPopupGui
+    try SetTimer(HideRequiredTowersPopup136, 0)
+    if IsSet(RequiredTowersPopupGui) && RequiredTowersPopupGui {
+        try RequiredTowersPopupGui.Destroy()
+        RequiredTowersPopupGui := 0
+    }
+}
+
 StartStrategy(*) {
+    global WelcomeSetup136
+    if WelcomeSetup136
+        return
     global RunningStrategy, CurrentRotationIndex, gamemap, difficulty, requiredTowers, modifiers, Recording
+    global StrategyPaused, StrategyPauseStartedAt, ActiveRuntimeTimers, PausedHeldInputs, Tab1_Pause
+    global MapOverrideConfirmed136
     global autoChain, autoCaravan, autoDropTheBeat, AutoSkip, AbilitySpam, MoveEnabled, MoveDirection, MoveDuration
     global AutorunStartTime, CurrentStratStartTime
 
@@ -4305,19 +4536,25 @@ StartStrategy(*) {
     IniDelete(StateFile, "State", "StartTime")
     IniDelete(StateFile, "State", "TimeWhenStartedPlaying")
     IniDelete(StateFile, "State", "Equipped")
-
     AutorunStartTime := 0
 
     LoadStrategyFile(stratFile)
-
-    if (requiredTowers != "" && !AutoEquip)
-        MsgBox(requiredTowers, "Required Towers", "0x1040 T60")
+    ClearPlacementPending136()
+    showRequiredTowers := (requiredTowers != "")
 
     IniWrite(1, StateFile, "State", "Running")
     IniWrite(stratFile, StateFile, "State", "Strategy")
 
     MainGui.Hide()
     RunningStrategy := true
+    StrategyPaused := false
+    StrategyPauseStartedAt := 0
+    MapOverrideConfirmed136 := false
+    ActiveRuntimeTimers := Map()
+    PausedHeldInputs := []
+    SetActionButtonLabel(Tab1_Pause, "Pause / Resume  (F2)", "neutral")
+    if showRequiredTowers
+        ShowRequiredTowersPopup136(requiredTowers)
 
     time := FormatTime(, "HH:mm:ss")
     SplitPath(stratFile, &fileName)
@@ -4335,7 +4572,12 @@ StartStrategy(*) {
         if ProcessExist(A_LoopField) {
             MsgBox("Conflicting program detected:`n" A_LoopField "`n`nFor this script to work properly, please close all Roblox multi-client utilities.`nPlease close them and try again.",
                 "Error", 0x1030)
-            ExitApp()
+            RuntimeLogWarn("unsupported_multi_instance", "Multi-instance utility conflict detected during startup")
+            ; Avoid terminating UM unexpectedly; return to setup so the user can resolve the conflict.
+            RunningStrategy := false
+            IniWrite(0, StateFile, "State", "Running")
+            MainGui.Show()
+            return
         }
     }
 
@@ -4346,20 +4588,112 @@ StartStrategy(*) {
 
     if !RunStrategy("", true) {
         if (RunningStrategy) {
-            RuntimeLogError("strategy_lifecycle_failed", "Strategy lifecycle ended before completing its transition")
-            StopStrategy()
+            RuntimeLogWarn("strategy_lifecycle_recovery", "Strategy phase failed; preserving running state and recovering")
+            RecoverRuntimeFailure("strategy_lifecycle")
         }
     }
 }
 
+CaptureHeldInputs136() {
+    held := []
+    for key in ["o", "w", "a", "s", "d", "Shift", "Ctrl", "Left", "Right", "Up", "Down"] {
+        try {
+            if GetKeyState(key, "L")
+                held.Push(key)
+        }
+    }
+    for button in ["LButton", "RButton"] {
+        try {
+            if GetKeyState(button, "L")
+                held.Push(button)
+        }
+    }
+    return held
+}
+
+RestoreHeldInputs136(held) {
+    for key in held {
+        if (key = "LButton")
+            Click("Left Down")
+        else if (key = "RButton")
+            Click("Right Down")
+        else
+            SendEvent("{" key " down}")
+    }
+}
+
+ToggleStrategyPause(*) {
+    global RunningStrategy, StrategyPaused, StrategyPauseStartedAt, ActiveRuntimeTimers
+    global PausedHeldInputs, Tab1_Pause, StateFile
+
+    if !RunningStrategy
+        return
+
+    if !StrategyPaused {
+        PausedHeldInputs := CaptureHeldInputs136()
+        ReleaseHeldInput()
+        for _, timerInfo in ActiveRuntimeTimers
+            try SetTimer(timerInfo.callback, 0)
+        try KillSubmacros()
+
+        StrategyPaused := true
+        StrategyPauseStartedAt := A_TickCount
+        SetActionButtonLabel(Tab1_Pause, "Resume  (F2)", "accent")
+        LogToConsole("Strategy paused. Roblox keeps running; press F2 to resume or F3 to stop.", true)
+        Pause(1)
+        return
+    }
+
+    StrategyPaused := false
+    pauseDuration := (StrategyPauseStartedAt > 0) ? (A_TickCount - StrategyPauseStartedAt) : 0
+    if (pauseDuration > 0) {
+        heartbeatTick := 0
+        try heartbeatTick := Integer(IniRead(StateFile, "State", "HeartbeatTick", "0"))
+        if (heartbeatTick > 0)
+            try IniWrite(heartbeatTick + pauseDuration, StateFile, "State", "HeartbeatTick")
+    }
+    StrategyPauseStartedAt := 0
+    RestoreHeldInputs136(PausedHeldInputs)
+    PausedHeldInputs := []
+    for _, timerInfo in ActiveRuntimeTimers
+        try SetTimer(timerInfo.callback, timerInfo.period)
+    try startWatchdog()
+    SetActionButtonLabel(Tab1_Pause, "Pause / Resume  (F2)", "neutral")
+    LogToConsole("Strategy resumed.", true)
+    Pause(0)
+}
+
 StopStrategy(*) {
-    global RunningStrategy, AutorunStartTime, Recording, MacroRecording, InputHookObj
+    global StateFile, RuntimeStopReady, StopRequestedDuringStartup
+    if !IsSet(RuntimeStopReady) || !RuntimeStopReady {
+        StopRequestedDuringStartup := true
+        if IsSet(StateFile) {
+            try IniWrite(0, StateFile, "State", "Running")
+        }
+        return
+    }
+    try IniWrite(0, StateFile, "ReviewRemote", "StopAfterMatch")
+    global RunningStrategy, AutorunStartTime, Recording, MacroRecording, InputHookObj, RecoveryCooldownPending
+    global StrategyPaused, StrategyPauseStartedAt, PausedHeldInputs, Tab1_Pause
 
     wasRunning := IsSet(RunningStrategy) && RunningStrategy
+    wasPaused := IsSet(StrategyPaused) && StrategyPaused
     wasRecording := IsSet(Recording) && Recording
     wasMacroRecording := IsSet(MacroRecording) && MacroRecording
-    if (wasRunning)
+    if (wasRunning) {
+        try AutoLogsFinish(StateFile, SettingsFile, "UserStop")
         RunningStrategy := false
+    }
+    StrategyPaused := false
+    StrategyPauseStartedAt := 0
+    PausedHeldInputs := []
+    if IsSet(Tab1_Pause)
+        SetActionButtonLabel(Tab1_Pause, "Pause / Resume  (F2)", "neutral")
+    ; Explicit F3, UI Stop, or authorized remote Stop always overrides recovery delays.
+    try SetTimer(RecoveryDeferredRestart, 0)
+    RecoveryCooldownPending := false
+    try IniDelete(StateFile, "Recovery", "WindowStart")
+    try IniDelete(StateFile, "Recovery", "Count")
 
     StopRuntimeTimers()
     if (wasRunning || wasRecording || wasMacroRecording)
@@ -4395,6 +4729,8 @@ StopStrategy(*) {
         IniDelete(StateFile, "State", "HeartbeatPhase")
         IniDelete(StateFile, "State", "HeartbeatTick")
         IniDelete(StateFile, "State", "HeartbeatTimeout")
+        if wasPaused
+            Pause(0)
         SafeReload()
         return
     }
@@ -4430,6 +4766,8 @@ RecordingAutosavePath() {
 }
 
 BuildStrategyFileText(steps, width := 0, height := 0) {
+    global AutoCollectShards
+    global EventLoadout136
     global gamemap, difficulty, requiredTowers, modifiers
     global autoChain, autoCaravan, autoDropTheBeat, AutoSkip, AbilitySpam
     global MoveEnabled, MoveDirection, MoveDuration, RecordingWidth, RecordingHeight
@@ -4443,7 +4781,8 @@ BuildStrategyFileText(steps, width := 0, height := 0) {
         . "`nmodifiers=" Join(modifiers)
         . "`nautoChain=" autoChain "`nautoCaravan=" autoCaravan "`nautoDropTheBeat=" autoDropTheBeat
         . "`nautoSkip=" AutoSkip "`nabilitySpam=" AbilitySpam "`nmoveEnabled=" MoveEnabled "`nmoveDirection=" MoveDirection
-        . "`nmoveDuration=" MoveDuration "`n`n[DO NOT EDIT]`nwidth=" width "`nheight=" height
+        . "`nmoveDuration=" MoveDuration "`nautoCollectShards=" (AutoCollectShards ? "ON" : "OFF")
+        . "`neventLoadout=" EventLoadout136 "`n`n[DO NOT EDIT]`nwidth=" width "`nheight=" height
         . "`n`n[Steps]`n"
 
     for i, step in steps
@@ -4615,7 +4954,25 @@ FinalizeMacroInputRecording(promptToAdd := true) {
     return addToStrategy ? capturedCount : 0
 }
 
+ResetRecordingSelection136() {
+    global ActiveRTowerID, CachedResV2, CachedResV1, CachedMenuUI
+    global isUiPositionSaved, isUpgradeAuthorized, activeUpgradeRegions, LastOpenedTowerID
+    ActiveRTowerID := ""
+    CachedResV2 := ""
+    CachedResV1 := ""
+    CachedMenuUI := { x: 0, y: 0 }
+    isUiPositionSaved := false
+    isUpgradeAuthorized := false
+    activeUpgradeRegions := [0, 0, 0, 0]
+    LastOpenedTowerID := ""
+}
+
 StartRecording(ctrl, *) {
+    global WelcomeSetup136
+    if WelcomeSetup136
+        return
+    global AutoCollectShards
+    global EventLoadout136
     global Recording, gamemap, difficulty, requiredTowers, modifiers, autoChain, autoCaravan
     global autoDropTheBeat, AutoSkip, AbilitySpam, MoveEnabled, MoveDirection, MoveDuration
     global Commander, RecordedSteps, Towers, MacroRecording, GuiTitleCtrl
@@ -4705,15 +5062,18 @@ StartRecording(ctrl, *) {
     AutoSkip := v.RecAutoSkip ? "ON" : "OFF"
     AbilitySpam := v.RecAbilitySpam ? "ON" : "OFF"
     MoveEnabled := v.RecMoveEnabled ? true : false
+    AutoCollectShards := v.RecCollectShards = 1
+    EventLoadout136 := v.RecEventLoadout
     MoveDirection := v.RecMoveDirection
     MoveDuration := IsNumber(v.RecMoveDuration) ? Integer(v.RecMoveDuration) : 750
 
+    DeleteAllIndicators()
+    ResetRecordingSelection136()
     Commander := false
     Recording := true
     RecordedSteps := []
     Towers := Map()
     RecordedTowerIds := Map()
-    DeleteAllIndicators()
     RecordingAutosaveStart()
 
     LogToConsole("Recording started.")
@@ -4741,6 +5101,7 @@ StopRecord(ctrl, *) {
         return
     Recording := false
     DeleteAllIndicators()
+    ResetRecordingSelection136()
 
     SetActionButtonEnabled(Tab2_Btn1, true)
     SetActionButtonEnabled(Tab2_Btn2, false)
@@ -5035,8 +5396,11 @@ DeleteTowerRecordingHK(*) {
 
     if (closestID != "") {
         if (HasProp(Towers[closestID], "hwnd") && Towers[closestID].hwnd) {
-            try WinClose("ahk_id " Towers[closestID].hwnd)
+            try GuiFromHwnd(Towers[closestID].hwnd).Destroy()
+            catch Error
+                try WinClose("ahk_id " Towers[closestID].hwnd)
         }
+        ResetRecordingSelection136()
 
         newSteps := []
 
@@ -5063,7 +5427,8 @@ DeleteTowerRecordingHK(*) {
         if RecordedTowerIds.Has(closestID)
             RecordedTowerIds.Delete(closestID)
 
-        LogToConsole("Removed tower " closestID " from the recording")
+        RuntimeLogInfo("record_tower_deleted", "Removed recorded placement and reset selection", "tower=" closestID)
+        LogToConsole("Removed tower " closestID " from recording (Roblox tower stays in game)")
     }
 }
 
@@ -5196,9 +5561,8 @@ CloneTowerHK(*) {
         return
     }
 
-    CloneTower(towerID, mx, my)
-
-    RecordStep("CloneTower(" towerID ", " mx ", " my ")")
+    if CloneTower(towerID, mx, my)
+        RecordStep("CloneTower(" towerID ", " mx ", " my ")")
 }
 
 BrawlerRepositionHK(*) {
@@ -5742,8 +6106,13 @@ ChangeTargets(towerID, target) {
     }
 }
 
+CloneTowerTimedOut136(startTick, nowTick, timeoutMs := 300000) {
+    return timeoutMs > 0 && nowTick - startTick >= timeoutMs
+}
+
 CloneTower(towerId, x, y, wait := 0) {
     global Towers, unfocusX, unfocusY, LastOpenedTowerID, CancelPlacementKey, HologramKey, Recording, canUseAbility
+    global RunningStrategy
 
     if (!Towers.Has(towerID)) {
         LogToConsole("Tower " towerID " not found!")
@@ -5755,11 +6124,18 @@ CloneTower(towerId, x, y, wait := 0) {
     }
 
     canUseAbility := false
-
-    SendEvent("{" CancelPlacementKey "}")
-    Sleep 50
-
-    loop {
+    cloneStartTick := A_TickCount
+    try {
+        SendEvent("{" CancelPlacementKey "}")
+        Sleep 50
+        loop {
+        if CloneTowerTimedOut136(cloneStartTick, A_TickCount) {
+            LogToConsole("Clone Tower stopped after waiting five minutes for the ability or a valid placement.", true)
+            SendEvent("{" CancelPlacementKey "}")
+            if RunningStrategy
+                StopStrategy()
+            return false
+        }
         SendEvent("{" CancelPlacementKey "}")
         Click(ScaleX(unfocusX), ScaleY(unfocusY))
         Sleep(120)
@@ -5873,11 +6249,12 @@ CloneTower(towerId, x, y, wait := 0) {
             continue
         } else {
             LogToConsole("Successfully cloned tower " towerId ".")
-            break
+            return true
         }
+        }
+    } finally {
+        canUseAbility := true
     }
-
-    canUseAbility := true
 }
 
 BrawlerReposition(towerId, x, y) {
@@ -6509,71 +6886,82 @@ TestWebhook(ctrl, *) {
 }
 
 TestBot(ctrl, *) {
-    global BotToken, ChannelID
+    global BotToken, ChannelID, UserID
     v := MainGui.Submit(false)
+    token := Trim(v.BotToken)
+    channel := Trim(v.ChannelID)
 
-    if (v.BotToken = "") {
-        ModernMsgBox("Error", "Enter a bot token first!", "OK", "WARNING")
+    if (token = "") {
+        ModernMsgBox("Bot test", "Enter a bot token first.", "OK", "WARNING")
         return
     }
 
-    if (v.ChannelID = "") {
-        ModernMsgBox("Error", "Enter a channel ID first!", "OK", "WARNING")
+    if (channel = "") {
+        ModernMsgBox("Bot test", "Enter a channel ID first.", "OK", "WARNING")
         return
     }
+
+    BotToken := token
+    ChannelID := channel
+    UserID := Trim(WebhookUserIDCtrl2.Value)
+    AutoSaveBotSettings()
 
     try {
-        whr := ComObject("WinHttp.WinHttpRequest.5.1")
-        whr.Option[9] := 2720
-        whr.Open("POST", "https://discord.com/api/v10/channels/" v.ChannelID "/messages", false)
-        whr.SetRequestHeader("User-Agent", "DiscordBot (AHK, " A_AhkVersion ")")
-        whr.SetRequestHeader("Authorization", "Bot " v.BotToken)
-        whr.SetRequestHeader("Content-Type", "application/json")
-        whr.SetTimeouts(0, 3000, 3000, 3000)
-        whr.Send('{"content": "✅ Bot test successful! Ultimate Macro TDS is connected."}')
+        Discord.SendCard(
+            "**Bot test successful**`nThe personal bot can send Components V2 messages to this channel.",
+            Discord.ColorSuccess,
+            ,
+            channel
+        )
 
-        if (whr.Status = 200 || whr.Status = 201 || whr.Status = 204) {
-            ModernMsgBox("Success", "Bot test successful! Message sent to channel.", "OK")
+        status := Discord.LastStatus
+        if (status = 200 || status = 201 || status = 204) {
+            ModernMsgBox("Bot test", "Message sent. If commands do not respond, enable Message Content Intent in the Developer Portal.", "OK")
         } else {
-            errorMsg := "Bot test failed! Status: " whr.Status
+            errorMsg := "The bot test failed. Status: " status
 
             try {
-                response := JSON.parse(whr.ResponseText)
+                response := JSON.parse(Discord.LastResponseText)
                 if response.Has("message")
                     errorMsg .= "`n`nDiscord Error: " response["message"]
             }
 
-            switch whr.Status {
+            switch status {
                 case 401:
-                    errorMsg .= "`n`nInvalid bot token!"
+                    errorMsg .= "`n`nThe bot token is invalid or expired."
                 case 403:
-                    errorMsg .= "`n`nBot lacks permission to send messages in this channel!"
+                    errorMsg .= "`n`nThe bot lacks permission to send messages in this channel."
                 case 404:
-                    errorMsg .= "`n`nChannel not found! Check Channel ID."
+                    errorMsg .= "`n`nThe channel was not found. Check the channel ID."
                 case 429:
-                    errorMsg .= "`n`nRate limited! Try again later."
+                    errorMsg .= "`n`nDiscord rate-limited the request. Try again shortly."
             }
 
-            ModernMsgBox("Error", errorMsg, "OK", "WARNING")
+            ModernMsgBox("Bot test", errorMsg, "OK", "WARNING")
         }
     } catch as err {
-        ModernMsgBox("Error", "Failed to send test message. Check your connection and settings.`n`n" err.Message, "OK",
+        ModernMsgBox("Bot test", "Could not send the test message. Check your connection and settings.`n`n" err.Message, "OK",
             "WARNING")
     }
 }
 
 AutoSaveBotSettings(*) {
-    global BotToken, BotEnabled, ChannelID, UserID, BotPrefix
+    global BotToken, BotEnabled, ChannelID, UserID, BotPrefix, BotSettings
+    global BotConnectionNoticeSent, BotConnectionNoticeNextTry
     static lastPrefixWarning := ""
 
     ClearPendingSettingSave("botsettings")
 
-    BotToken := BotTokenCtrl.Value
+    previousToken := BotToken
+    previousChannel := ChannelID
+    previousUser := UserID
+    previousEnabled := BotEnabled
+    BotToken := Trim(BotTokenCtrl.Value)
     BotEnabled := BotEnabledCtrl.Value
-    ChannelID := ChannelIDCtrl.Value
-    UserID := WebhookUserIDCtrl2.Value
+    ChannelID := Trim(ChannelIDCtrl.Value)
+    UserID := Trim(WebhookUserIDCtrl2.Value)
 
-    SaveBotSetting("Token", "BotToken", BotToken)
+    Discord.SaveProtectedToken(BotSettings, BotToken)
     SaveBotSetting("Settings", "Enabled", BotEnabled)
     SaveBotSetting("Settings", "Channel", ChannelID)
     SaveBotSetting("Settings", "UserID", UserID)
@@ -6594,11 +6982,18 @@ AutoSaveBotSettings(*) {
         SaveBotSetting("Settings", "Prefix", BotPrefix)
     }
 
-    if (BotEnabled && ChannelID != "" && UserID != "") {
-        SetTimer(ProcessCommands, 7500, 1)
+    if (previousToken != BotToken || previousChannel != ChannelID || previousUser != UserID
+        || previousEnabled != BotEnabled) {
+        BotConnectionNoticeSent := false
+        BotConnectionNoticeNextTry := 0
+    }
+
+    if (BotEnabled && BotToken != "" && Discord.IsValidSnowflake(ChannelID) && Discord.IsValidSnowflake(UserID)) {
+        SetTimer(ProcessCommands, BotCommandPollMs, 1)
     } else {
         SetTimer(ProcessCommands, 0)
     }
+    DiscordGatewaySync()
 }
 
 NormalizeKey(keyName) {
@@ -6675,7 +7070,10 @@ ApplyDarkInputTheme(guiObj) {
                     EnableDarkInputFrame(ctrl.Hwnd, false)
                     RegisterDarkInputSurface(ctrl.Hwnd)
                 case "CheckBox":
-                    EnableDarkInputFrame(ctrl.Hwnd, true)
+                    ; Windows themed buttons can override the custom foreground.
+                    ctrl.Opt("-Theme")
+                    DllCall("uxtheme\SetWindowTheme", "Ptr", ctrl.Hwnd, "Str", "", "Str", "")
+                    ctrl.SetFont("cE2E4E7")
             }
         }
     }
@@ -7567,6 +7965,8 @@ CheckWebhookLink2(*) {
 }
 
 LoadStrategyFile(file) {
+    global AutoCollectShards
+    global EventLoadout136, SolarNightLobbyConfirmed136
     global Towers, RecordedSteps, RecordedTowerIds, gamemap, difficulty, requiredTowers, autoChain, autoCaravan
     global autoDropTheBeat, AutoSkip, AbilitySpam, MoveEnabled, MoveDirection, MoveDuration
     global modifiers, Commander, StrategyWidth, StrategyHeight, TimescaleActive
@@ -7591,6 +7991,11 @@ LoadStrategyFile(file) {
 
     gamemap := IniRead(file, "Settings", "map", "")
     difficulty := IniRead(file, "Settings", "difficulty", "")
+    AutoCollectShards := IniRead(file, "Settings", "autoCollectShards", "OFF") = "ON"
+    EventLoadout136 := IniRead(file, "Settings", "eventLoadout", "Your Loadout")
+    if !InArray(["Your Loadout", "Tactician", "Experimental", "Crowd Control"], EventLoadout136)
+        EventLoadout136 := "Your Loadout"
+    SolarNightLobbyConfirmed136 := false
     requiredTowers := IniRead(file, "Settings", "requiredTowers", "")
     autoChain := IniRead(file, "Settings", "autoChain", "OFF")
     autoCaravan := IniRead(file, "Settings", "autoCaravan", "OFF")
@@ -7659,7 +8064,8 @@ RunStrategy(stratFile := "", skipRestart := false) {
     global unfocusX, unfocusY, UseTimeScale, TimeScaleMultiplier, TimeScaleMode
     global SettingsFile, requiredTowers, modifiers, LastOpenedTowerID
     global LastSkipCheck, SKIP_CHECK_INTERVAL, AutorunStartTime, StateFile
-    global WebhookEnabled, CurrentStratStartTime, CurrentRunCount, gamemap, AutoEquip, IsRestarting
+    global WebhookEnabled, CurrentStratStartTime, CurrentRunCount, gamemap, IsRestarting, RecordedSteps, ver, AutoEquip
+    TurboInit136(SettingsFile)
 
     if (RunningStrategy != true)
         return
@@ -7694,13 +8100,16 @@ RunStrategy(stratFile := "", skipRestart := false) {
     CurrentRunCount++
     IniWrite(CurrentRunCount, StateFile, "State", "CurrentRunCount")
 
+    ; One optional report per match. Never required for gameplay.
+    try AutoLogsBegin(SettingsFile, StateFile, ver, IniRead(StateFile, "State", "Strategy", ""), RecordedSteps)
+
     KillSubmacros()
     startWatchdog()
     MacroPhase("startup", 240000)
 
     LastOpenedTowerID := ""
 
-    LogToConsole("Starting strategy... Press F2 to STOP!!!")
+    LogToConsole("Starting strategy... F2 pauses or resumes; F3 stops.")
     LogToConsole("Map = " gamemap)
     LogToConsole("Mode = " difficulty)
     LogToConsole("Timescale = " TimeScaleMode)
@@ -7734,10 +8143,8 @@ RunStrategy(stratFile := "", skipRestart := false) {
             CloseRoblox()
             if !RunRoblox()
                 return false
-            if (AutoEquip) {
-                if !EquipTowers(RequiredTowers)
-                    return false
-            }
+            if (AutoEquip && !EquipTowers(requiredTowers))
+                return false
             if !JoinGame()
                 return false
         }
@@ -7745,9 +8152,8 @@ RunStrategy(stratFile := "", skipRestart := false) {
         CloseRoblox()
         if !RunRoblox()
             return false
-        if !EquipTowers(RequiredTowers)
+        if (AutoEquip && !EquipTowers(requiredTowers))
             return false
-
         if !JoinGame()
             return false
     }
@@ -7758,14 +8164,14 @@ RunStrategy(stratFile := "", skipRestart := false) {
     }
 
     if (!IsRestarting) {
-        if !CheckTheMapF()
-            return false
         if (!InArray(SpecialMaps, gamemap) && ResolveArcadeTarget() = "") {
             if !AlignCamera() {
                 SafeReload()
                 return false
             }
         }
+        if !CheckTheMapF()
+            return false
     }
 
     if !activateTimescale()
@@ -7784,7 +8190,7 @@ RunStrategy(stratFile := "", skipRestart := false) {
 
     if !PlayStrategy() {
         if (RunningStrategy)
-            StopStrategy()
+            RecoverRuntimeFailure("strategy_execution")
         return false
     }
     return true
@@ -7793,11 +8199,26 @@ RunStrategy(stratFile := "", skipRestart := false) {
 PlayStrategy() {
     global canUseAbility, MultiplayerEnabled, StateFile, RunningStrategy
 
+    if ResolveSolarNight136() != "" {
+        MacroPhase("solar_night_intro", 20000)
+        if !WaitForSolarNightIntro136() {
+            RuntimeLogWarn("solar_night_intro_aborted", "Night 1 intro did not clear; stopping before strategy actions")
+            LogToConsole("Night 1 intro could not be skipped. Stopping before strategy actions.", true, false)
+            RunningStrategy := false
+            IniWrite(0, StateFile, "State", "Running")
+            StopRuntimeTimers()
+            KillSubmacros()
+            if IsSet(MainGui) && MainGui
+                MainGui.Show()
+            return false
+        }
+    }
+
     MacroPhase("playing", 900000)
     IniWrite(A_TickCount, StateFile, "State", "TimeWhenStartedPlaying")
-    SetTimer(UseAbilities, 750)
+    SetRuntimeTimer136("UseAbilities", UseAbilities, 750)
     if (MultiplayerEnabled) {
-        SetTimer(checkCondition, 15000)
+        SetRuntimeTimer136("checkCondition", checkCondition, 15000)
     }
 
     i := 1
@@ -7806,6 +8227,7 @@ PlayStrategy() {
             return false
         step := RecordedSteps[i]
         MacroPhase("playing_step", 900000)
+        try AutoLogsEvent(StateFile, "action_requested", "step=" i " " AutoLogsSafeStep(step))
 
         if RegExMatch(step,
             "i)UpgradeTower\s*\(\s*([^,]+?)\s*(?:,\s*(false|true)\s*)?(?:,\s*(\d+)\s*)?(?:,\s*(\d+)\s*)?(?:,\s*(\d+)\s*)?\s*\)", &
@@ -7834,6 +8256,7 @@ PlayStrategy() {
             }
 
             success := UpgradeTower(currentID, false, countUpgrades, currentPath, currentpathLevel)
+            try AutoLogsEvent(StateFile, "upgrade_call_result", "step=" i "; tower=" currentID "; returned=" (success ? "true" : "false") "; requested=" countUpgrades)
             i := success ? lookAhead : i + 1
         } else if RegExMatch(step, "i)SetDJTrack\s*\(\s*([^\s,)]+)\s*\)", &t) {
             SetDJTrack(t[1])
@@ -7844,6 +8267,7 @@ PlayStrategy() {
                     return false
                 RuntimeLogWarn("placement_step_failed", "Placement did not complete; continuing with the next step",
                     "step=" i)
+                try AutoLogsEvent(StateFile, "placement_unverified", "step=" i)
             }
             i++
         } else {
@@ -7860,6 +8284,8 @@ PlayStrategy() {
     LogToConsole("All strategy steps completed...")
     MacroPhase("waiting_result", 7200000)
     loop {
+        if !TryAutoCollectShard136()
+            return false
         canUseAbility := true
         LastOpenedTowerID := ""
         Sleep 3000
@@ -7884,8 +8310,7 @@ ExecuteStep(step) {
     }
 
     if RegExMatch(step, "i)CloneTower\s*\(\s*([^,]+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", &m) {
-        CloneTower(Trim(m[1]), sX(Integer(m[2]), StrategyWidth), sY(Integer(m[3]), StrategyHeight), Integer(m[4]))
-        return
+        return CloneTower(Trim(m[1]), sX(Integer(m[2]), StrategyWidth), sY(Integer(m[3]), StrategyHeight), Integer(m[4]))
     }
 
     if RegExMatch(step, "i)^ToggleAutoskip\s*\(\s*\)$", &m) {
@@ -7898,8 +8323,7 @@ ExecuteStep(step) {
     }
 
     if RegExMatch(step, "i)CloneTower\s*\(\s*([^,]+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", &m) {
-        CloneTower(Trim(m[1]), sX(Integer(m[2]), StrategyWidth), sY(Integer(m[3]), StrategyHeight), 0)
-        return
+        return CloneTower(Trim(m[1]), sX(Integer(m[2]), StrategyWidth), sY(Integer(m[3]), StrategyHeight), 0)
     }
     if RegExMatch(step, "i)ActivateRaiseTheDead\s*\(\s*(\d+)\s*\)", &m) {
         ActivateRaiseTheDead(Integer(m[1]))
@@ -7949,7 +8373,8 @@ ExecuteStep(step) {
     if RegExMatch(step, "i)^Sleep\s*\(\s*(\d+)\s*\)$", &m) {
         strategySleepMs := Integer(m[1])
         MacroPhase("strategy_sleep", Max(300000, strategySleepMs + 120000))
-        Sleep(strategySleepMs)
+        if !SleepWithShardCollection136(strategySleepMs)
+            return false
         MacroPhase("playing_step", 900000)
         return
     }
@@ -7974,12 +8399,14 @@ LowerGraphics() {
 }
 
 EquipTowers(towers) {
-    MacroPhase("equipping_towers", 300000)
-    if !getRobloxPos(, , &rw, &rh) {
-        RuntimeLogWarn("autoequip_geometry_missing", "Auto Equip could not resolve Roblox client geometry")
-        SafeReload()
-        return false
-    }
+    global RunningStrategy, StateFile, MainGui
+    getRobloxPos(,,&rw,&rh)
+
+    LogToConsole("Equipping towers: " towers)
+    RuntimeLogWarn("auto_equip_known_limitation",
+        "Auto Equip is unreliable and may select the wrong tower or variant; verify the hotbar before gameplay",
+        "required_towers=" towers)
+    LogToConsole("Warning: Auto Equip may select the wrong tower or variant. Verify the hotbar before gameplay.", true, false)
 
     savedCloseX := 0
     savedCloseY := 0
@@ -7987,55 +8414,16 @@ EquipTowers(towers) {
     closeChat()
     Sleep(600)
 
-    StartTime := A_TickCount
-    loop {
-        W := Round(rw * 0.3)
-        H := rh - 0
-
-        resItems := AdvancedImageSearch("Resources\items.png", 0, 0, W, H)
-        if (resItems.status == "success" && resItems.score > 0.56) {
-            fx := resItems.x
-            fy := resItems.y
-            MouseMove(fx, fy + ScaleY(7), A_DefaultMouseSpeed + 1)
-            Sleep(100)
-            MouseClick()
-            break
-        }
-        if (A_TickCount - StartTime > 4000) {
-            break
-        }
-        Sleep(500)
-    }
-
-    Sleep(MacroDelay("TowerMenu"))
-
+    maxAttempts := 3
     openedMenu := false
-    StartTime := A_TickCount
-    loop {
-        X1 := Round(rw * 0.2)
-        Y1 := 0
-        W := Round(rw * 1) - X1
-        H := Round(rh * 0.4) - Y1
-        resclose := AdvancedImageSearch("Resources\close_items.png", X1, Y1, W, H)
 
-        if (resclose.status = "success" && resclose.score >= 0.85) {
-            openedMenu := true
-            savedCloseX := resclose.x
-            savedCloseY := resclose.y
-            break
-        }
-        if (A_TickCount - StartTime > 4000)
-            break
-        Sleep(500)
-    }
-
-    if (!openedMenu) {
+    Loop maxAttempts {
+        itemsClicked := false
         StartTime := A_TickCount
-
         W := Round(rw * 0.3)
         H := rh - 0
 
-        loop {
+        Loop {
             resItems := AdvancedImageSearch("Resources\items.png", 0, 0, W, H)
             if (resItems.status == "success" && resItems.score > 0.56) {
                 fx := resItems.x
@@ -8043,51 +8431,62 @@ EquipTowers(towers) {
                 MouseMove(fx, fy + ScaleY(7), A_DefaultMouseSpeed + 1)
                 Sleep(100)
                 MouseClick()
+                itemsClicked := true
+                break
+            } 
+            if (A_TickCount - StartTime > 5000) {
                 break
             }
-
-            if (A_TickCount - StartTime > 5000)
-                break
-            Sleep(300)
+            Sleep(500)
         }
 
-        openedMenu := false
-        StartTime := A_TickCount
-        loop {
-            X1 := Round(rw * 0.2)
-            Y1 := 0
-            W := Round(rw * 1) - X1
-            H := Round(rh * 0.4) - Y1
-            resclose := AdvancedImageSearch("Resources\close_items.png", X1, Y1, W, H)
+        if (!itemsClicked) {
+            continue
+        }
 
-            if (resclose.status = "success" && resclose.score >= 0.85) {
+        Sleep(800)
+
+        StartTime := A_TickCount
+        X1 := Round(rw * 0.2)
+        Y1 := 0
+        W_close := Round(rw * 1) - X1
+        H_close := Round(rh * 0.4) - Y1
+
+        Loop {
+            resclose := AdvancedImageSearch("Resources\close_items.png", X1, Y1, W_close, H_close)
+
+            if (resclose.status == "success" && resclose.score >= 0.85) {
                 openedMenu := true
                 savedCloseX := resclose.x
                 savedCloseY := resclose.y
                 break
-            }
-
-            if (A_TickCount - StartTime > 2000)
+            } 
+            if (A_TickCount - StartTime > 4000) {
                 break
+            }
             Sleep(500)
         }
 
-        if (!openedMenu) {
-            LogToConsole("Failed to equip towers! The macro can't see the towers menu! Reloading...", true, false)
-            Sleep 400
-            SafeReload()
-            return
+        if (openedMenu) {
+            break
         }
+    }
+
+    if (!openedMenu) {
+        LogToConsole("Failed to equip towers! The macro can't see the towers menu! Reloading...", true, false)
+        Sleep(400)
+        SafeReload()
+        return
     }
 
     srchX := ScaleX(484)
     srchY := ScaleY(229)
 
     StartTime := A_TickCount
-    loop {
-        resBar := AdvancedImageSearch("Resources\searchbar_items.png", 0, 0, Round(rw * 0.5), Round(rh * 0.5))
+    Loop {
+        resBar := AdvancedImageSearch("Resources\searchbar_items.png", 0,0,Round(rh*0.5),Round(rh*0.5))
         if (resBar.status == "success" && resBar.score > 0.67) {
-            srchX := resBar.x + 30
+            srchX := resBar.x+30
             srchY := resBar.y
             break
         }
@@ -8096,83 +8495,73 @@ EquipTowers(towers) {
         Sleep(400)
     }
 
-    if (resBar.status != "success" || resBar.score <= 0.67) {
-        RuntimeLogWarn("autoequip_searchbar_fallback", "Auto Equip search bar template was not found; using scaled fallback",
-            "width=" rw "; height=" rh "; x=" srchX "; y=" srchY)
-    }
-
-    Click(srchX, srchY)
-    Sleep(MacroDelay("SearchBox"))
-
-    SendText("Sniper")
-    Sleep(MacroDelay("SearchList"))
-    Click(srchX + 10, ScaleY(409))
-    Sleep(MacroDelay("MenuClick"))
-
-    X := Round(rw * 0.61)
-    Y := ScaleY(830)
+    X := Round(rw * 0.609)
+    Y := Round(rh * 0.809)
     X1 := Round(rw * 0.4)
     Y1 := Round(rh * 0.4)
     W := Round(rw * 0.9) - X1
     H := rh - Y1
 
-    StartTime := A_TickCount
-    loop {
-        getRobloxPos(, , &w, &h)
-        baseScale := GetClientTemplateScale(h)
-
-        resAlign := AdvancedImageSearch("Resources\equip.png", X1, Y1, W, H, 0.5 * baseScale, 2, 0.025)
-
-        if (resAlign.status == "success" && resAlign.score > 0.4) {
-            Y := resAlign.y + ScaleY(110)
+    clearedSlots := 0
+    slot1Empty := false
+    Loop 6 {
+        blankMatch := FindAutoEquipBlankSlot136(1, rw, rh)
+        if (ClassifyAutoEquipSlot136(blankMatch, "UNKNOWN") = "EMPTY") {
+            slot1Empty := true
+            RuntimeLogInfo("auto_equip_slot1_empty", "Verified slot 1 is visibly blank",
+                "cleared_slots=" clearedSlots)
+            break
         }
 
-        offset := -30
-        baseY := Y
-
-        MouseMove(X, Y + ScaleY(offset))
-
-        oldMode := A_SendMode
-        oldDelay := A_MouseDelay
-        SendMode("Input")
-        SetMouseDelay(0)
-
-        while (offset <= 30) {
-            cY := baseY + ScaleY(offset)
-
-            MouseClick("Left", X, cY)
-
-            offset += 5
-            Sleep 5
-        }
-        SendMode(oldMode)
-        SetMouseDelay(oldDelay)
-
-        Sleep(600)
+        SelectAutoEquipLoadoutSlot136(1, rw, rh)
+        Sleep(150)
         failCount := 0
-
         InnerStart := A_TickCount
-        loop {
+        Loop {
             X1 := Round(rw * 0.4)
             Y1 := Round(rh * 0.5)
             W := Round(rw * 0.9) - X1
             H := rh - Y1
 
-            getRobloxPos(, , &w, &h)
-            baseScale := GetClientTemplateScale(h)
+            getRobloxPos(,,&w,&h)
+            baseScale := Round(h / 1009)
 
             resUnequip := AdvancedImageSearch("Resources\unequip.png", X1, Y1, W, H, 0.3 * baseScale, 1.4, 0.025)
             if (resUnequip.status == "success" && resUnequip.score > 0.63) {
-                if (PixelSearch(&uX, &uY, resUnequip.x - ScaleX(40), resUnequip.y - ScaleY(25), resUnequip.x + ScaleX(
-                    40), resUnequip.y + ScaleY(25), 0x7A797A, 5)) {
+                resEquipState := AdvancedImageSearch("Resources\equip.png", X1, Y1, W, H,
+                    0.5 * baseScale, 1.4, 0.025)
+                if (IsActualUnequipButton136(resUnequip, resEquipState)
+                    && PixelSearch(&uX, &uY, resUnequip.x-ScaleX(40), resUnequip.y-ScaleY(25),
+                        resUnequip.x+ScaleX(40), resUnequip.y+ScaleY(25), 0x7A797A, 15)) {
+                    if (clearedSlots >= 5) {
+                        RuntimeLogWarn("auto_equip_clear_limit", "A sixth occupied slot remained after clearing five slots")
+                        LogToConsole("Auto Equip could not clear the loadout. Stopping before matchmaking.", true, false)
+                        RunningStrategy := false
+                        try IniWrite(0, StateFile, "State", "Running")
+                        StopRuntimeTimers()
+                        KillSubmacros()
+                        if IsSet(MainGui) && MainGui
+                            MainGui.Show()
+                        return false
+                    }
                     Click(resUnequip.x, resUnequip.y)
-                    MouseMove(resUnequip.x, resUnequip.y - ScaleY(80))
+                    if !WaitForAutoEquipButtonState136("EQUIP", X1, Y1, W, H, baseScale,
+                        2500, &buttonX, &buttonY, &buttonState) {
+                        return StopAutoEquip136("slot1_unequip_transition_unconfirmed",
+                            "cleared_slots=" clearedSlots "; button_state=" buttonState)
+                    }
+                    clearedSlots++
+                    RuntimeLogInfo("auto_equip_clear_click", "Clicked a verified Unequip control",
+                        "cleared_slots=" clearedSlots)
+                    Sleep 20
+                    MouseMove(resUnequip.x, resUnequip.y-ScaleY(80))
                     failCount := 0
                     break
                 } else {
                     failCount++
                     if (failCount >= 5) {
-                        break 2
+                        return StopAutoEquip136("slot1_button_state_unknown",
+                            "cleared_slots=" clearedSlots "; unequip_score=" resUnequip.score)
                     }
                     Sleep(200)
                     continue
@@ -8180,7 +8569,8 @@ EquipTowers(towers) {
             } else {
                 failCount++
                 if (failCount >= 3) {
-                    break 2
+                    return StopAutoEquip136("slot1_not_proven_occupied_or_empty",
+                        "cleared_slots=" clearedSlots "; blank_score=" (IsObject(blankMatch) ? blankMatch.score : "unknown"))
                 }
             }
             if (A_TickCount - InnerStart > 3000)
@@ -8190,76 +8580,85 @@ EquipTowers(towers) {
         Sleep(400)
     }
 
-    loop parse, towers, "," {
+    if (!slot1Empty) {
+        blankMatch := FindAutoEquipBlankSlot136(1, rw, rh)
+        slot1Empty := ClassifyAutoEquipSlot136(blankMatch, "UNKNOWN") = "EMPTY"
+    }
+    if !slot1Empty
+        return StopAutoEquip136("slot1_clear_budget_exhausted", "cleared_slots=" clearedSlots)
+
+    if !VerifyAutoEquipFinalSlots136(0, rw, rh, &badSlot) {
+        RuntimeLogWarn("auto_equip_slot1_shift_fallback",
+            "Slot 1 is blank but later loadout slots remain nonblank or unknown; clearing those slots right-to-left",
+            "first_nonempty_or_unknown_slot=" badSlot "; cleared_slots=" clearedSlots)
+        if !ClearAutoEquipRemainingSlots136(rw, rh, &fallbackClearedSlots) {
+            return StopAutoEquip136("loadout_not_visibly_empty",
+                "first_nonempty_or_unknown_slot=" badSlot "; cleared_slots=" clearedSlots
+                "; fallback_cleared_slots=" fallbackClearedSlots)
+        }
+        clearedSlots += fallbackClearedSlots
+    }
+    RuntimeLogInfo("auto_equip_loadout_cleared", "Verified all five loadout slots are blank",
+        "cleared_slots=" clearedSlots)
+
+    requiredCount := StrSplit(Trim(towers), ",").Length
+    if (requiredCount < 1 || requiredCount > 5)
+        return StopAutoEquip136("invalid_required_tower_count", "required_count=" requiredCount)
+    verifiedTowerCount := 0
+    
+    Loop Parse, towers, ","
+    {
         ActivateRoblox()
         tower := Trim(A_LoopField)
-        if (tower = "")
-            continue
-
-        if !getRobloxPos(, , &rw, &rh) {
-            RuntimeLogWarn("autoequip_geometry_lost", "Roblox client geometry disappeared while equipping",
-                "tower=" tower)
-            SafeReload()
-            return false
-        }
 
         goldtower := RegExMatch(tower, "i)\b(Golden|G\.|G)\b") ? true : false
         regulartower := RegExMatch(tower, "i)\b(Regular|R\.|R)\b") ? true : false
 
         towerToEnter := RegExReplace(tower, "i)\b(Golden|G\.|G|Regular|R\.|R)\b\s*|\.")
-        towerToEnter := Trim(towerToEnter)
+        towerToEnter := Trim(towerToEnter) 
 
         Click(srchX, srchY)
-        Sleep(MacroDelay("SearchBox"))
+        Sleep(150)
+        SendEvent("^a")
+        SendEvent("{Backspace}")
+        Sleep(80)
 
-        Send("^a")
-        Send("{Backspace}")
-        SendText(towerToEnter)
-        Sleep(MacroDelay("SearchList"))
-        Click(srchX + 10, ScaleY(409))
-        Sleep(MacroDelay("MenuClick"))
+        kdelay := A_KeyDelay
+        changedDelay := false
+        if (A_KeyDelay < 5) {
+        SendInput(towerToEnter)
+        } else {
+            SendText(towerToEnter)
+        }
+        Sleep(500)
+        Click(srchX+10, ScaleY(409))
+        Sleep(500)
 
         X1 := Round(rw * 0.4)
         Y1 := Round(rh * 0.5)
         W := Round(rw * 0.9) - X1
         H := rh - Y1
 
+        equipClickIssued := false
         TowerStart := A_TickCount
-        towerEquipped := false
-        loop {
-            baseScale := GetClientTemplateScale(rh)
+        Loop {
+            getRobloxPos(,,&w,&h)
+            baseScale := h / 1009
 
             resEquip := AdvancedImageSearch("Resources\equip.png", X1, Y1, W, H, 0.5 * baseScale, 1.4, 0.025)
 
             if (resEquip.status == "success" && resEquip.score > 0.4) {
-                if (PixelSearch(&eX, &eY, resEquip.x - ScaleX(40), resEquip.y - ScaleY(25),
-                    resEquip.x + ScaleX(40), resEquip.y + ScaleY(25), 0x45DC4A, 7)) {
+                If (PixelSearch(&eX, &eY, resEquip.x-40, resEquip.y-25, resEquip.x+40, resEquip.y+25, 0x45DC4A, 7)) {
                     Click(resEquip.x, resEquip.y)
-                    verifyDeadline := A_TickCount + 1800
-                    loop {
-                        resUnequip := AdvancedImageSearch("Resources\\unequip.png", X1, Y1, W, H,
-                            0.3 * baseScale, 1.4, 0.025)
-                        if (resUnequip.status == "success" && resUnequip.score > 0.63) {
-                            towerEquipped := true
-                            RuntimeLogInfo("autoequip_tower_confirmed", "Auto Equip state changed after click",
-                                "tower=" tower)
-                            break
-                        }
-                        if (A_TickCount >= verifyDeadline)
-                            break
-                        Sleep(150)
-                    }
-
-                    if !towerEquipped
-                        continue
-
+                    RuntimeLogInfo("auto_equip_equip_click", "Clicked the selected tower's green Equip control",
+                        "tower=" tower)
+                    
                     if (goldtower) {
                         GoldStart := A_TickCount
-                        loop {
-                            resGolden := AdvancedImageSearch("Resources\notgolden.png", X1, Y1, W, H)
+                        Loop {
+                            resGolden := AdvancedImageSearch("Resources\notgolden.png", X1, Y1, W, H) 
                             if (resGolden.status == "success" && resGolden.score > 0.55) {
-                                if (PixelSearch(&eX, &eY, resGolden.x - 40, resGolden.y - 25, resGolden.x + 40,
-                                    resGolden.y + 25, 0x1E1E1E, 4)) {
+                                If (PixelSearch(&eX, &eY, resGolden.x-40, resGolden.y-25, resGolden.x+40, resGolden.y+25, 0x1E1E1E, 4)) {
                                     Click(resGolden.x, resGolden.y)
                                     Sleep(300)
                                     break
@@ -8270,14 +8669,13 @@ EquipTowers(towers) {
                             Sleep(400)
                         }
                     }
-
+                    
                     if (regulartower) {
                         RegStart := A_TickCount
-                        loop {
-                            resGolden := AdvancedImageSearch("Resources\golden.png", X1, Y1, W, H, 0.4, 2)
+                        Loop {
+                            resGolden := AdvancedImageSearch("Resources\golden.png", X1, Y1, W, H, 0.4, 2) 
                             if (resGolden.status == "success" && resGolden.score > 0.55) {
-                                if (PixelSearch(&eX, &eY, resGolden.x - 40, resGolden.y - 25, resGolden.x + 40,
-                                    resGolden.y + 25, 0xFFC11F, 8)) {
+                                If (PixelSearch(&eX, &eY, resGolden.x-40, resGolden.y-25, resGolden.x+40, resGolden.y+25, 0xFFC11F, 8)) {
                                     Click(resGolden.x, resGolden.y)
                                     Sleep(300)
                                     break
@@ -8288,6 +8686,15 @@ EquipTowers(towers) {
                             Sleep(400)
                         }
                     }
+                    if !WaitForAutoEquipButtonState136("UNEQUIP", X1, Y1, W, H, baseScale,
+                        2500, &verifiedButtonX, &verifiedButtonY, &verifiedButtonState) {
+                        return StopAutoEquip136("tower_equip_transition_unconfirmed",
+                            "tower=" tower "; observed_state=" verifiedButtonState)
+                    }
+                    equipClickIssued := true
+                    verifiedTowerCount++
+                    RuntimeLogInfo("auto_equip_tower_verified", "Verified required tower switched to Unequip",
+                        "tower=" tower "; verified_count=" verifiedTowerCount "; required_count=" requiredCount)
                     break
                 }
                 Sleep(100)
@@ -8296,15 +8703,15 @@ EquipTowers(towers) {
                 break
             Sleep(400)
         }
-
-        if !towerEquipped {
-            RuntimeLogWarn("autoequip_tower_timeout", "Tower equip control was not confirmed within bounded retries",
-                "tower=" tower "; elapsed_ms=" (A_TickCount - TowerStart))
-            LogToConsole("Failed to equip tower '" tower "' reliably. Reloading...", true, false)
-            SafeReload()
-            return false
-        }
+        if !equipClickIssued
+            return StopAutoEquip136("tower_not_equipped", "tower=" tower "; verified_count=" verifiedTowerCount)
         Sleep(400)
+    }
+
+    finalLoadoutVerified := VerifyAutoEquipFinalSlots136(requiredCount, rw, rh, &badSlot)
+    if !finalLoadoutVerified {
+        return StopAutoEquip136("final_loadout_mismatch", "first_bad_slot=" badSlot
+            "; verified_towers=" verifiedTowerCount "; required_towers=" requiredCount)
     }
     X1 := Round(rw * 0.2)
     Y1 := 0
@@ -8312,34 +8719,213 @@ EquipTowers(towers) {
     H := Round(rh * 0.4) - Y1
     resclose := AdvancedImageSearch("Resources\close_items.png", X1, Y1, W, H)
 
-    if (resclose.status = "success" && resclose.score >= 0.85) {
+    If (resclose.status = "success" && resclose.score >= 0.85) {
         Click(resclose.x, resclose.y)
     } else if (savedCloseX != 0 && savedCloseY != 0) {
         Click(savedCloseX, savedCloseY)
     }
+
+    closeStart := A_TickCount
+    inventoryClosed := false
+    while (A_TickCount - closeStart <= 2500) {
+        if AutoEquipInventoryClosed136(rw, rh) {
+            inventoryClosed := true
+            break
+        }
+        Sleep(120)
+    }
+    if !AutoEquipCanCommit136(requiredCount, verifiedTowerCount, finalLoadoutVerified, inventoryClosed)
+        return StopAutoEquip136("final_commit_not_verified", "verified_towers=" verifiedTowerCount
+            "; required_towers=" requiredCount "; inventory_closed=" inventoryClosed)
 
     LogToConsole("Successfully equipped towers: " towers, true, false)
     IniWrite(1, StateFile, "State", "Equipped")
     return true
 }
 
+IsActualUnequipButton136(unequipMatch, equipMatch) {
+    if !IsObject(unequipMatch) || unequipMatch.status != "success" || unequipMatch.score <= 0.63
+        return false
+    if (IsObject(equipMatch) && equipMatch.status = "success" && equipMatch.score > 0.4
+        && Abs(equipMatch.x - unequipMatch.x) <= ScaleX(70)
+        && Abs(equipMatch.y - unequipMatch.y) <= ScaleY(40)
+        && PixelSearch(&equipPixelX, &equipPixelY,
+            equipMatch.x - ScaleX(40), equipMatch.y - ScaleY(25),
+            equipMatch.x + ScaleX(40), equipMatch.y + ScaleY(25), 0x45DC4A, 60))
+        return false
+    return true
+}
+
+ClassifyAutoEquipSlot136(blankMatch, buttonState) {
+    if (IsObject(blankMatch) && blankMatch.status = "success" && blankMatch.score >= 0.75)
+        return "EMPTY"
+    if (buttonState = "UNEQUIP")
+        return "OCCUPIED"
+    return "UNKNOWN"
+}
+
+ClearAutoEquipRemainingSlots136(clientW, clientH, &clearedCount := 0) {
+    clearedCount := 0
+    baseScale := clientH / 1009.0
+    searchX := Round(clientW * 0.4)
+    searchY := Round(clientH * 0.5)
+    searchW := Round(clientW * 0.9) - searchX
+    searchH := clientH - searchY
+
+    ; Clear right-to-left so a left-shifting loadout cannot move a tower into
+    ; a slot that this fallback already scanned.
+    Loop 5 {
+        slotNumber := 6 - A_Index
+        blankMatch := FindAutoEquipBlankSlot136(slotNumber, clientW, clientH)
+        if (ClassifyAutoEquipSlot136(blankMatch, "UNKNOWN") = "EMPTY")
+            continue
+
+        SelectAutoEquipLoadoutSlot136(slotNumber, clientW, clientH)
+        Sleep(150)
+        if !WaitForAutoEquipButtonState136("ANY", searchX, searchY, searchW, searchH,
+            baseScale, 2000, &buttonX, &buttonY, &buttonState)
+            return false
+        if (buttonState != "UNEQUIP")
+            return false
+
+        Click(buttonX, buttonY)
+        if !WaitForAutoEquipButtonState136("EQUIP", searchX, searchY, searchW, searchH,
+            baseScale, 2500, &verifiedX, &verifiedY, &verifiedState)
+            return false
+        clearedCount++
+        RuntimeLogInfo("auto_equip_fallback_clear", "Cleared a later occupied slot after slot-1 clearing left it nonblank",
+            "slot=" slotNumber "; cleared_slots=" clearedCount)
+        MouseMove(buttonX, buttonY - ScaleY(80))
+    }
+
+    return VerifyAutoEquipFinalSlots136(0, clientW, clientH, &badSlot)
+}
+
+AutoEquipCanCommit136(requiredCount, verifiedCount, finalLoadoutVerified, inventoryClosed) {
+    return requiredCount > 0 && verifiedCount = requiredCount && finalLoadoutVerified && inventoryClosed
+}
+
+FindAutoEquipBlankSlot136(slotNumber, clientW, clientH) {
+    centerX := Round(clientW * (0.609 + ((slotNumber - 1) * 0.046)))
+    centerY := Round(clientH * 0.809)
+    regionW := Max(40, Round(clientW * 0.046))
+    regionH := Max(32, Round(clientH * 0.085))
+    baseScale := clientH / 1009.0
+    return AdvancedImageSearch("Resources\empty_loadout_slot.png",
+        centerX - Round(regionW / 2), centerY - Round(regionH / 2), regionW, regionH,
+        0.9 * baseScale, 1.8 * baseScale, 0.035)
+}
+
+VerifyAutoEquipFinalSlots136(requiredCount, clientW, clientH, &badSlot := 0) {
+    badSlot := 0
+    Loop 5 {
+        slot := A_Index
+        blankMatch := FindAutoEquipBlankSlot136(slot, clientW, clientH)
+        slotIsBlank := (IsObject(blankMatch) && blankMatch.status = "success" && blankMatch.score >= 0.75)
+        expectedOccupied := slot <= requiredCount
+        if (expectedOccupied = slotIsBlank) {
+            badSlot := slot
+            return false
+        }
+    }
+    return true
+}
+
+ReadAutoEquipButtonState136(x1, y1, searchW, searchH, baseScale, &buttonX := 0, &buttonY := 0) {
+    buttonX := 0
+    buttonY := 0
+    unequipMatch := AdvancedImageSearch("Resources\unequip.png", x1, y1, searchW, searchH,
+        0.3 * baseScale, 1.4, 0.025)
+    equipMatch := AdvancedImageSearch("Resources\equip.png", x1, y1, searchW, searchH,
+        0.5 * baseScale, 1.4, 0.025)
+
+    if (IsActualUnequipButton136(unequipMatch, equipMatch)
+        && PixelSearch(&uX, &uY, unequipMatch.x - ScaleX(40), unequipMatch.y - ScaleY(25),
+            unequipMatch.x + ScaleX(40), unequipMatch.y + ScaleY(25), 0x7A797A, 15)) {
+        buttonX := unequipMatch.x
+        buttonY := unequipMatch.y
+        return "UNEQUIP"
+    }
+
+    if (IsObject(equipMatch) && equipMatch.status = "success" && equipMatch.score > 0.4
+        && PixelSearch(&eX, &eY, equipMatch.x - ScaleX(40), equipMatch.y - ScaleY(25),
+            equipMatch.x + ScaleX(40), equipMatch.y + ScaleY(25), 0x45DC4A, 60)) {
+        buttonX := equipMatch.x
+        buttonY := equipMatch.y
+        return "EQUIP"
+    }
+    return "UNKNOWN"
+}
+
+WaitForAutoEquipButtonState136(expectedState, x1, y1, searchW, searchH, baseScale,
+    timeout := 2500, &buttonX := 0, &buttonY := 0, &observedState := "") {
+    deadline := A_TickCount + timeout
+    observedState := "UNKNOWN"
+    while (A_TickCount <= deadline) {
+        observedState := ReadAutoEquipButtonState136(x1, y1, searchW, searchH, baseScale,
+            &buttonX, &buttonY)
+        if (expectedState = "ANY") {
+            if (observedState != "UNKNOWN")
+                return true
+        } else if (observedState = expectedState) {
+            return true
+        }
+        Sleep(120)
+    }
+    return false
+}
+
+SelectAutoEquipLoadoutSlot136(slotNumber, clientW, clientH) {
+    centerX := Round(clientW * (0.609 + ((slotNumber - 1) * 0.046)))
+    centerY := Round(clientH * 0.809)
+    MouseMove(centerX, centerY, A_DefaultMouseSpeed)
+    Sleep(100)
+    MouseClick("Left", centerX, centerY)
+    Sleep(140)
+    MouseClick("Left", centerX, centerY)
+    return true
+}
+
+AutoEquipInventoryClosed136(clientW, clientH) {
+    x1 := Round(clientW * 0.2)
+    y1 := 0
+    searchW := Round(clientW * 0.8)
+    searchH := Round(clientH * 0.4)
+    closeMatch := AdvancedImageSearch("Resources\close_items.png", x1, y1, searchW, searchH)
+    return !(closeMatch.status = "success" && closeMatch.score >= 0.85)
+}
+
+StopAutoEquip136(reason, details := "") {
+    global RunningStrategy, StateFile, MainGui
+    RunningStrategy := false
+    RuntimeLogError("auto_equip_verification_failed", "Auto Equip stopped before matchmaking",
+        "reason=" reason (details != "" ? "; " details : ""))
+    LogToConsole("Auto Equip stopped before matchmaking: " reason, true, false)
+    try IniWrite(0, StateFile, "State", "Running")
+    try IniWrite(0, StateFile, "State", "Equipped")
+    StopRuntimeTimers()
+    KillSubmacros()
+    if IsSet(MainGui) && MainGui
+        MainGui.Show()
+    return false
+}
+
 CheckRestart() {
-    global IsRestarting, difficulty, UseRestartBtn, UsePlayAgainBtn, CollectPlaytimeRewards, requiredTowers, AutoEquip
+    global IsRestarting, difficulty, UseRestartBtn, UsePlayAgainBtn, CollectPlaytimeRewards
+    global AutoEquip, requiredTowers, StateFile
+
+    shouldEquip := !Number(IniRead(StateFile, "State", "Equipped", 0))
 
     shouldCollectRewards := (CollectPlaytimeRewards = "1" || CollectPlaytimeRewards = 1) && CheckDailyRewardTime() && (
         AutorunStartTime = 0 || (A_TickCount - AutorunStartTime) > 300000)
-    shouldEquip := !Number(IniRead(StateFile, "State", "Equipped", 0))
-
     if (shouldCollectRewards && !MultiplayerEnabled) {
         LogToConsole("Navigating to lobby to check playtime rewards...", true, false)
         IsRestarting := false
         CloseRoblox()
         if !RunRoblox()
             return false
-        if (shouldEquip && AutoEquip) {
-            if !EquipTowers(requiredTowers)
-                return false
-        }
+        if (shouldEquip && AutoEquip && !EquipTowers(requiredTowers))
+            return false
         return JoinGame()
     }
 
@@ -8359,7 +8945,7 @@ CheckRestart() {
 
             if (resCancel.status == "success" && resCancel.score > 0.7) {
                 ActivateRoblox()
-                Click(resCancel.x, resCancel.y)
+                ClickPlay136(resCancel.x, resCancel.y)
                 Sleep 250
             }
         }
@@ -8375,10 +8961,9 @@ CheckRestart() {
                 }
 
                 res := resRestart.score > resRestart2.score ? resRestart : resRestart2
-                IsRestarting := true
-                LogToConsole("Restarting the match")
+                restartClickIssued := false
                 if !(MultiplayerEnabled) {
-                    Click(res.x, res.y)
+                    restartClickIssued := ClickPlay136(res.x, res.y)
                 } else {
                     totalPartyMembers := 0
                     loop parse, PartyMembers, "," {
@@ -8390,17 +8975,26 @@ CheckRestart() {
                     }
                     if totalPartyMembers = 2 || totalPartyMembers = 3 {
                         if PlayerRole != "Host" {
-                            Click(res.x, res.y)
+                            restartClickIssued := ClickPlay136(res.x, res.y)
+                        } else {
+                            restartClickIssued := true
                         }
                     } else {
                         if PlayerRole = "Host" {
-                            Click(res.x, res.y)
+                            restartClickIssued := ClickPlay136(res.x, res.y)
+                        } else {
+                            restartClickIssued := true
                         }
                     }
                 }
-                Sleep(150)
-                startWatchdog()
-                return true
+                if (restartClickIssued) {
+                    IsRestarting := true
+                    LogToConsole("Restarting the match")
+                    Sleep(150)
+                    startWatchdog()
+                    return true
+                }
+                RuntimeLogWarn("restart_click_failed", "Could not focus Roblox to press Restart")
             }
         }
 
@@ -8412,14 +9006,19 @@ CheckRestart() {
                 if (MultiplayerEnabled && PlayerRole = "Host") {
                     Sleep 5000
                 }
+                replayHandled := (MultiplayerEnabled && PlayerRole != "Host")
                 if (!MultiplayerEnabled || PlayerRole = "Host") {
-                    Click(resReplay.x, resReplay.y)
+                    replayHandled := ClickPlay136(resReplay.x, resReplay.y)
+                    if !replayHandled
+                        RuntimeLogWarn("play_again_click_failed", "Could not focus Roblox to press Play Again")
                 }
-                Sleep(150)
-                if !WaitForLobbyLoad()
-                    return false
-                startWatchdog()
-                return true
+                if replayHandled {
+                    Sleep(150)
+                    if !WaitForLobbyLoad()
+                        return false
+                    startWatchdog()
+                    return true
+                }
             }
         }
     }
@@ -8429,11 +9028,53 @@ CheckRestart() {
     CloseRoblox()
     if !RunRoblox()
         return false
-    if (shouldEquip && AutoEquip) {
-        if !EquipTowers(requiredTowers)
-            return false
-    }
+    if (shouldEquip && AutoEquip && !EquipTowers(requiredTowers))
+        return false
     return JoinGame()
+}
+
+FindInstalledRobloxPlayer136(baseDir := "") {
+    if baseDir = ""
+        baseDir := EnvGet("LOCALAPPDATA") "\Roblox\Versions"
+    newest := "", newestTime := ""
+    loop files, baseDir "\*", "D" {
+        player := A_LoopFileFullPath "\RobloxPlayerBeta.exe"
+        if !FileExist(player)
+            continue
+        try modified := FileGetTime(player, "M")
+        catch Error
+            continue
+        if newest = "" || modified > newestTime
+            newest := player, newestTime := modified
+    }
+    return newest
+}
+
+LaunchRobloxDeepLink136(deepLink) {
+    if !RegExMatch(deepLink, "i)^roblox://(?:placeID=\d+(?:&linkcode=[a-f0-9]+)?|navigation/share_links\?code=[a-f0-9]+&type=Server)$") {
+        RuntimeLogError("roblox_launch_invalid", "Roblox launch URI was invalid")
+        return false
+    }
+    try {
+        Run(deepLink)
+        return true
+    } catch Error {
+        RuntimeLogWarn("roblox_protocol_launch_failed", "Windows could not launch the Roblox URI; trying the installed player")
+    }
+    player := FindInstalledRobloxPlayer136()
+    if player = "" {
+        RuntimeLogError("roblox_player_missing", "No desktop Roblox player was found for direct launch")
+        return false
+    }
+    try {
+        Run(Chr(34) player Chr(34) " " Chr(34) deepLink Chr(34))
+        RuntimeLogInfo("roblox_direct_launch", "Submitted the same Roblox URI to the installed player")
+        return true
+    } catch Error as launchError {
+        RuntimeLogError("roblox_direct_launch_failed", "The installed Roblox player could not be started",
+            "error=" launchError.Message)
+        return false
+    }
 }
 
 RunRoblox(doReload := true) {
@@ -8461,11 +9102,22 @@ RunRoblox(doReload := true) {
             RuntimeLogError("auto_settings_prepare_failed",
                 "Roblox launch blocked because Auto Settings could not be prepared safely", "detail=" detail)
             LogToConsole("Auto Settings preparation failed; Roblox was not launched. " detail, true, false)
+            ; Auto Settings may have a protected backup. Never bypass a failed safe preparation.
+            ; Keep the run state, retry through the bounded recovery policy.
             if (IsSet(RunningStrategy) && RunningStrategy)
-                StopStrategy()
+                RecoverRuntimeFailure("auto_settings_unavailable")
             return false
         }
-        Run(DeepLink)
+        if !LaunchRobloxDeepLink136(DeepLink) {
+            RunningStrategy := false
+            try IniWrite(0, StateFile, "State", "Running")
+            StopRuntimeTimers()
+            KillSubmacros()
+            LogToConsole("Roblox could not launch. Open TDS once from the Roblox website, then try F1 again.", true, false)
+            if IsSet(MainGui)
+                MainGui.Show()
+            return false
+        }
         robloxopened := false
         loop 60 {
             if WinExist("Roblox ahk_exe RobloxPlayerBeta.exe") {
@@ -8488,11 +9140,10 @@ RunRoblox(doReload := true) {
         }
         ActivateRoblox()
         ExitFullScreen()
-        WinMinimize "Roblox"
-        WinMaximize "Roblox"
+        EnsureRobloxMaximized136()
         ActivateRoblox()
 
-        SetTimer(CheckPopups, 5000)
+        SetRuntimeTimer136("CheckPopups", CheckPopups, 5000)
 
         startTime := A_TickCount
         geometryLogAt := 0
@@ -8517,15 +9168,36 @@ RunRoblox(doReload := true) {
                 continue
             }
 
-            res0 := AdvancedImageSearch("Resources/Play.png", Round(w * 0.25), Round(h * 0.66), Round(w * 0.75), Round(
-                h * 0.34))
+            res0 := FindLobbyControl136("Play", w, h)
             if (res0.status = "success" && res0.score > 0.65) {
+                ; Recheck the final game window, after startup/loading has finished.
+                EnsureRobloxMaximized136()
                 break
             }
-            Sleep(1500)
+            Sleep(250)
         }
         SendEvent("{sc00F}")
         return true
+    }
+}
+
+EnsureRobloxMaximized136() {
+    hwnd := GetRobloxHWND()
+    if !hwnd
+        return false
+    rootHwnd := DllCall("user32\GetAncestor", "Ptr", hwnd, "UInt", 2, "Ptr")
+    if rootHwnd
+        hwnd := rootHwnd
+    target := "ahk_id " hwnd
+    try {
+        if WinGetMinMax(target) = 1
+            return true
+        WinMaximize(target)
+        Sleep(150)
+        return WinGetMinMax(target) = 1
+    } catch Error as err {
+        RuntimeLogWarn("roblox_maximize_failed", "Could not maximize the Roblox game window", "error=" err.Message)
+        return false
     }
 }
 
@@ -8639,7 +9311,7 @@ TryOpenArcadeCategory(w, h) {
             navY := screenY + Round(screenH * 0.08)
             navW := Round(screenW * 0.09)
             navH := Round(screenH * 0.50)
-            ocrResult := OCR.FromRect(navX, navY, navW, navH, {
+            ocrResult := ReadGameText136(navX, navY, navW, navH, {
                 lang: langCode,
                 scale: 1.7,
                 grayscale: 1
@@ -8702,7 +9374,7 @@ TryClickArcadeTarget(target, w, h) {
         ocrY := screenY + Round(screenH * 0.05)
         ocrW := Round(screenW * 0.76)
         ocrH := Round(screenH * 0.80)
-        ocrResult := OCR.FromRect(ocrX, ocrY, ocrW, ocrH, {
+        ocrResult := ReadGameText136(ocrX, ocrY, ocrW, ocrH, {
             lang: langCode,
             scale: 1.45,
             grayscale: 1
@@ -8721,27 +9393,157 @@ TryClickArcadeTarget(target, w, h) {
     return false
 }
 
+ClickPlay136(x, y) {
+    global RunningStrategy
+    if !ActivateRoblox() || !WinWaitActive("ahk_id " GetRobloxHWND(), , 1)
+        return false
+    oldCoord := A_CoordModeMouse, oldCritical := A_IsCritical
+    if IsSet(RunningStrategy) && !RunningStrategy
+        return false
+    Critical("On")
+    try {
+        CoordMode("Mouse", "Client")
+        MouseMove(x, y, 0)
+        ; Cursor positioning alone may not update Roblox's GUI hover state.
+        DllCall("user32\mouse_event", "UInt", 1, "Int", 1, "Int", 0, "UInt", 0, "UPtr", 0)
+        Sleep(150)
+        SendEvent("{LButton down}")
+        Sleep(80)
+    } finally {
+        SendEvent("{LButton up}")
+        CoordMode("Mouse", oldCoord)
+        Critical(oldCritical)
+    }
+    return true
+}
+
+FindLobbyControl136(label, w, h) {
+    missing := {status: "failed", score: 0}
+    if (label != "Play" && label != "Survival") || w <= 0 || h <= 0
+        return missing
+    if !ActivateRoblox()
+        return missing
+
+    ; TDS moves categories from the left sidebar to a top row in smaller windows.
+    x := 0, y := label = "Play" ? Round(h * .55) : 0
+    rw := w, rh := label = "Play" ? h - y : Round(h * .65)
+    path := label = "Play" ? "Resources/Play.png" : "Resources/standard_mode_category.png"
+    res := label = "Play" ? AdvancedImageSearch(path, x, y, rw, rh)
+        : AdvancedImageSearch(path, x, y, rw, rh, .3, 1.5, .025)
+    threshold := label = "Play" ? .85 : .73
+    if res.status = "success" && res.score >= threshold
+        return res
+
+    ; Do not run OCR every 100ms when a menu is still animating/loading.
+    static lastOcr := Map()
+    key := label "|" w "x" h
+    if lastOcr.Has(key) && A_TickCount - lastOcr[key] < 750
+        return missing
+    lastOcr[key] := A_TickCount
+    try {
+        if !GetRobloxScreenClientRect(&sx, &sy, &sw, &sh)
+            return missing
+        lang := "en-US"
+        for available in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
+            if SubStr(available, 1, 2) = "en" {
+                lang := available
+                break
+            }
+        }
+        text := ReadGameText136(sx + x, sy + y, rw, rh, {lang: lang, scale: 1.5, grayscale: 1})
+        for line in text.Lines {
+            ; Exact labels only: Play Again and event labels cannot match Play.
+            if StrLower(Trim(line.Text, " `t`r`n")) != StrLower(label)
+                continue
+            if !OcrMatchTargetsGameUI(line, label)
+                continue
+            cx := Round(line.x + line.w / 2 - sx)
+            cy := Round(line.y + line.h / 2 - sy)
+            if cx < x || cx >= x + rw || cy < y || cy >= y + rh
+                continue
+            RuntimeLogInfo("lobby_control_text_detected", "Detected lobby control by exact text", "target=" label)
+            return {status: "success", score: 1, x: cx, y: cy, scoreKind: "exact_text"}
+        }
+    } catch Error as err {
+        RuntimeLogWarn("lobby_control_ocr_failed", "Lobby control text detection failed", "target=" label "; error=" err.Message)
+    }
+    return missing
+}
+
+OpenStandardModeCategory136(timeout := 10000) {
+    global RunningStrategy
+    start := A_TickCount
+    lastPlayClick := -1000
+    loop {
+        if IsSet(RunningStrategy) && !RunningStrategy
+            return false
+        if getRobloxPos(, , &w, &h) && w > 0 && h > 0 {
+            ActivateRoblox()
+            category := FindLobbyControl136("Survival", w, h)
+            if category.status = "success" && category.score >= .73 {
+                if !ClickPlay136(category.x, category.y)
+                    return false
+                RuntimeLogInfo("standard_mode_category_clicked", "Clicked Survival before searching for difficulty",
+                    "score=" category.score)
+                Sleep(500)
+                return true
+            }
+            ; A swallowed Play click must not strand us searching a closed menu.
+            if A_TickCount - lastPlayClick >= 1000 {
+                play := FindLobbyControl136("Play", w, h)
+                if play.status = "success" {
+                    if !ClickPlay136(play.x, play.y)
+                        return false
+                    lastPlayClick := A_TickCount
+                    RuntimeLogInfo("lobby_play_retry", "Retried Play while waiting for Survival")
+                }
+            }
+        }
+        if A_TickCount - start >= timeout
+            break
+        Sleep(150)
+    }
+    RuntimeLogWarn("standard_mode_category_missing", "Survival was not detected by image or text; difficulty search was not started")
+    LogToConsole("Could not find Survival. Mode selection was not started.", true)
+    return false
+}
+
+ResolveSquadTarget136(partyCount) {
+    if (partyCount <= 0)
+        return "Solo"
+    if (partyCount = 1)
+        return "duo"
+    return "trio"
+}
+
 TryClickDifficultyTarget(target, w, h) {
     cardX := 0
     cardY := 0
     cardW := w
     cardH := h
+    imageThreshold := 0.70
 
     imagePath := "Resources/" target ".png"
     if FileExist(imagePath) {
-        res := AdvancedImageSearch(imagePath, cardX, cardY, cardW, cardH)
-        if (res.status = "success" && res.score >= 0.67) {
+        res := AdvancedImageSearch(imagePath, cardX, cardY, cardW, cardH, .3, 1.5, .025)
+        if (res.status = "success" && res.score >= imageThreshold) {
+            Sleep(120)
+            stable := AdvancedImageSearch(imagePath, cardX, cardY, cardW, cardH, .3, 1.5, .025)
+            if stable.status != "success" || stable.score < imageThreshold
+                || Abs(stable.x - res.x) > 8 || Abs(stable.y - res.y) > 8
+                return false
             RuntimeLogInfo("difficulty_image_select", "Selecting difficulty by image", "target=" target "; score=" res.score)
-            Click(res.x, res.y)
-            return true
+            return ClickPlay136(stable.x, stable.y)
         }
     }
 
-    if (target = "Hardcore") {
-        RuntimeLogWarn("difficulty_hardcore_image_missing",
-            "Hardcore image was not detected; refusing ambiguous OCR fallback")
+    ; Keep checking images on every pass, but avoid repeatedly running the
+    ; expensive OCR fallback on the same unchanged mode picker.
+    static lastOcrAt := -1000, lastOcrTarget := "", lastOcrSize := ""
+    sizeKey := w "x" h
+    if target = lastOcrTarget && sizeKey = lastOcrSize && A_TickCount - lastOcrAt < 650
         return false
-    }
+    lastOcrAt := A_TickCount, lastOcrTarget := target, lastOcrSize := sizeKey
 
     try {
         if !GetRobloxScreenClientRect(&screenX, &screenY, &screenW, &screenH)
@@ -8759,17 +9561,22 @@ TryClickDifficultyTarget(target, w, h) {
         ocrY := screenY + Round(screenH * 0.05)
         ocrW := Round(screenW * 0.76)
         ocrH := Round(screenH * 0.80)
-        ocrResult := OCR.FromRect(
+        ocrResult := ReadGameText136(
             ocrX,
             ocrY,
             ocrW,
             ocrH, { lang: langCode, scale: 1.45, grayscale: 1 }
         )
-        match := ocrResult.FindString(target, { CaseSense: false, IgnoreLinebreaks: true })
-        if (match && OcrMatchTargetsGameUI(match, target)) {
-            RuntimeLogInfo("difficulty_text_select", "Selecting difficulty by OCR", "target=" target)
-            match.Click()
-            return true
+        if InStr(ocrResult.Text, "Selected Night")
+            return false
+        for match in ocrResult.Lines {
+            if StrLower(Trim(match.Text, " `t`r`n")) != StrLower(target)
+                continue
+            if !OcrMatchTargetsGameUI(match, target)
+                continue
+            RuntimeLogInfo("difficulty_text_select", "Selecting exact menu-card label", "target=" target)
+            return ClickPlay136(Round(match.x + match.w / 2 - screenX),
+                Round(match.y + match.h / 2 - screenY))
         }
     } catch Error as difficultyOcrErr {
         RuntimeLogWarn("difficulty_ocr_error", "Difficulty OCR targeting failed",
@@ -8778,15 +9585,85 @@ TryClickDifficultyTarget(target, w, h) {
     return false
 }
 
+ParseSelectedDifficulty136(text) {
+    if !RegExMatch(text, "i)Selected\s+Game\s*mode\s*:\s*([A-Za-z\s]+)", &match)
+        return ""
+
+    observed := StrLower(RegExReplace(Trim(match[1]), "\s+", ""))
+    for mode in ["intermediate", "hardcore", "voidcore", "casual", "normal", "molten", "fallen", "frost", "insane", "easy", "hard"] {
+        if (SubStr(observed, 1, StrLen(mode)) = mode)
+            return StrUpper(SubStr(mode, 1, 1)) SubStr(mode, 2)
+    }
+    return ""
+}
+
+ConfirmSelectedDifficulty136(expected, w, h) {
+    global RunningStrategy, StateFile
+    if !GetRobloxScreenClientRect(&sx, &sy) {
+        RuntimeLogWarn("selected_difficulty_geometry_missing", "Could not confirm the selected mode before squad selection",
+            "expected=" expected)
+        return StopForUnconfirmedDifficulty136(expected, "unavailable")
+    }
+
+    try {
+        langCode := "en-US"
+        for availableLang in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
+            if (availableLang != "" && SubStr(availableLang, 1, 2) = "en") {
+                langCode := availableLang
+                break
+            }
+        }
+        loop 8 {
+            result := ReadGameText136(sx + Round(w * .2), sy + Round(h * .08),
+                Round(w * .6), Round(h * .23), {lang: langCode, scale: 1.5, grayscale: 1})
+            ; OCR can merge a reward notification onto the same line as the caption.
+            ; Capture only a supported Survival mode, not the remaining screen text.
+            actual := ParseSelectedDifficulty136(result.Text)
+            if (actual != "") {
+                if StrLower(actual) = StrLower(expected)
+                    return true
+                RuntimeLogWarn("selected_difficulty_mismatch",
+                    "Stopped before squad selection because the selected mode was wrong",
+                    "expected=" expected "; actual=" actual)
+                LogToConsole("Selected " actual " instead of " expected ". Stopped before joining. Press F1 to retry.", true, false)
+                return StopForUnconfirmedDifficulty136(expected, actual)
+            }
+            if (A_Index < 8)
+                Sleep(250)
+        }
+    } catch Error as err {
+        RuntimeLogWarn("selected_difficulty_check_failed", "Could not verify selected mode", "error=" err.Message)
+    }
+
+    RuntimeLogWarn("selected_difficulty_unconfirmed", "Could not read the selected mode; refusing to choose a squad",
+        "expected=" expected)
+    LogToConsole("Could not confirm mode " expected ". Stopping before squad selection.", true, false)
+    return StopForUnconfirmedDifficulty136(expected, "unreadable")
+}
+
+StopForUnconfirmedDifficulty136(expected, actual) {
+    global RunningStrategy, StateFile
+    RunningStrategy := false
+    try IniWrite(0, StateFile, "State", "Running")
+    StopRuntimeTimers()
+    KillSubmacros()
+    RuntimeLogWarn("selected_difficulty_aborted", "Stopped before squad selection because mode confirmation failed",
+        "expected=" expected "; observed=" actual)
+    return false
+}
+
 WaitForLobbyLoad() {
     global difficulty, MultiplayerEnabled, PlayerRole
+    if ResolveSolarNight136() != ""
+        return WaitForSolarLobby136()
 
     MacroPhase("lobby_load", 180000)
-    SetTimer(CheckPopups, 0)
+    SetRuntimeTimer136("CheckPopups", CheckPopups, 0)
 
     startTime := A_TickCount
     if (ResolveArcadeTarget() = "") {
-        Sleep(6000)
+        readySamples := 0
+        Sleep(150)
         loop {
             if (IsSet(RunningStrategy) && !RunningStrategy)
                 return false
@@ -8803,9 +9680,13 @@ WaitForLobbyLoad() {
             res := AdvancedImageSearch("Resources/Ready.png", Round(w * 0.25), Round(h * 0.66), Round(w * 0.5), Round(h *
                 0.34), 0.6, 1.7)
             if (res.status = "success" && res.score >= 0.7) {
-                break
+                readySamples++
+                if readySamples >= 2
+                    break
+            } else {
+                readySamples := 0
             }
-            Sleep(100)
+            Sleep(A_TickCount - startTime < 2000 ? 150 : 350)
         }
         if (!MultiplayerEnabled || PlayerRole = "Host") {
             if !SelectMap(res.x, res.y)
@@ -8822,10 +9703,15 @@ WaitForLobbyLoad() {
 }
 
 JoinGame() {
+    global SolarNightLobbyConfirmed136
+    SolarNightLobbyConfirmed136 := false
     global SendCurrenciesEnabled, WebhookEnabled, difficulty, CollectPlaytimeRewards, PlayerRole, MultiplayerEnabled
-    global readyX, readyY
+    global readyX, readyY, PlaytimeRewardsRecover136
+    SetRuntimeTimer136("CheckPopups", CheckPopups, 0)
+    EnsureRobloxMaximized136()
     readyX := 0
     readyY := 0
+    rewardsChecked := false
     MacroPhase("matchmaking", 240000)
     RuntimeLogInfo("matchmaking_ready_reset", "Reset Ready coordinates before fresh matchmaking join")
 
@@ -8846,16 +9732,21 @@ JoinGame() {
             continue
         }
 
-        x1 := Round(w * 0.25)
-        y1 := Round(h * 0.66)
-        x2 := Round(w * 0.75)
-        y2 := Round(h * 0.34)
-
-        res := AdvancedImageSearch("Resources\Play.png", x1, y1, x2, y2)
+        if IsSet(RunningStrategy) && !RunningStrategy
+            return false
+        res := FindLobbyControl136("Play", w, h)
         if (res.status == "success" && res.score > 0.65) {
             ActivateRoblox()
-            if (CollectPlaytimeRewards = "1" || CollectPlaytimeRewards = 1) {
+            if CollectPlaytimeRewards = 1 && !rewardsChecked {
+                rewardsChecked := true
                 claimPlaytimeRewards()
+                if PlaytimeRewardsRecover136 {
+                    RuntimeLogWarn("playtime_lobby_recovery", "Reopening Roblox after an unclosed reward popup; skipping rewards for this lobby visit")
+                    CloseRoblox()
+                    if !RunRoblox()
+                        return false
+                    continue
+                }
             }
 
             LowerGraphics()
@@ -8876,7 +9767,14 @@ JoinGame() {
                 joinTarget := difficulty
             LogToConsole("Joining " joinTarget "...", true, false)
 
-            Click(res.x, res.y)
+            ; Rewards, graphics and party setup can move or cover the original button.
+            res := FindLobbyControl136("Play", w, h)
+            if res.status != "success" {
+                Sleep(150)
+                continue
+            }
+            if !ClickPlay136(res.x, res.y)
+                return false
             MacroPhase("selecting_mode", 180000)
             break
         }
@@ -8888,7 +9786,10 @@ JoinGame() {
     arcadeScrollAttempts := 0
 
     arcadeTarget := ResolveArcadeTarget()
-    if (arcadeTarget != "") {
+    if ResolveSolarNight136() != "" {
+        if !JoinSolarNight136()
+            return false
+    } else if (arcadeTarget != "") {
         categoryStart := A_TickCount
         categoryOpened := false
         loop {
@@ -8941,6 +9842,8 @@ JoinGame() {
         }
         Sleep(300)
     } else {
+        if !OpenStandardModeCategory136()
+            return false
         difficultyStart := A_TickCount
         difficultyDeadline := difficultyStart + 60000
         lastPlayRetry := 0
@@ -8949,6 +9852,8 @@ JoinGame() {
         modeScrollAttempts := 0
 
         loop {
+            if IsSet(RunningStrategy) && !RunningStrategy
+                return false
             if !getRobloxPos(, , &w, &h) {
                 RuntimeLogWarn("difficulty_geometry_missing", "Roblox client geometry disappeared during difficulty selection")
                 SafeReload()
@@ -8986,13 +9891,20 @@ JoinGame() {
                 if (resPlay.status == "success" && resPlay.score > 0.7) {
                     RuntimeLogInfo("difficulty_play_recovery", "Reopening Play without extending the mode deadline",
                         "difficulty=" difficulty "; elapsed_ms=" elapsedDifficulty)
-                    Click(resPlay.x, resPlay.y)
+                    if ClickPlay136(resPlay.x, resPlay.y) {
+                        Sleep(300)
+                        if !OpenStandardModeCategory136(5000)
+                            return false
+                    } else {
+                        RuntimeLogWarn("difficulty_play_recovery_click_failed",
+                            "Could not focus Roblox to reopen Play during mode recovery")
+                    }
                 }
                 lastPlayRetry := A_TickCount
             }
             Sleep(100)
         }
-        Sleep(300)
+        Sleep(450)
     }
 
     MacroPhase("selecting_party_size", 120000)
@@ -9009,40 +9921,22 @@ JoinGame() {
             SafeReload()
             return false
         }
-        if (!MultiplayerEnabled) {
-            res := AdvancedImageSearch("Resources/Solo.png", 0, Round(h * 0.2), Round(w * 0.7), Round(h * 0.55))
-            if (res.status = "success" && res.score >= 0.7) {
-                Click(res.x, res.y)
-                break
-            }
-        } else {
-            totalPartyMembers := 0
-            loop parse, PartyMembers, "," {
-                member := Trim(A_LoopField)
-                if (member = "") {
-                    continue
-                }
-                totalPartyMembers++
-            }
-            if (totalPartyMembers = 1) {
-                res := AdvancedImageSearch("Resources/duo.png", Round(w * 0.2), Round(h * 0.2), Round(w * 0.6), Round(h *
-                    0.6))
-            } else if (totalPartyMembers = 2) {
-                res := AdvancedImageSearch("Resources/trio.png", Round(w * 0.2), Round(h * 0.2), Round(w * 0.6), Round(
-                    h * 0.6))
-            } else if (totalPartyMembers = 3) {
-                res := AdvancedImageSearch("Resources/quad.png", Round(w * 0.2), Round(h * 0.2), Round(w * 0.6), Round(
-                    h * 0.6))
-            } else {
-                res := AdvancedImageSearch("Resources/Solo.png", 0, Round(h * 0.2), Round(w * 0.7), Round(h * 0.55))
-            }
-
-            if (res.status = "success" && res.score >= 0.7) {
-                Click(res.x, res.y)
-                break
-            }
-
+        if IsSet(RunningStrategy) && !RunningStrategy
+            return false
+        if ResolveSolarNight136() = "" && ResolveArcadeTarget() = "" && !ConfirmSelectedDifficulty136(difficulty, w, h) {
+            Sleep(200)
+            continue
         }
+        partyCount := 0
+        if MultiplayerEnabled {
+            loop parse, PartyMembers, "," {
+                if Trim(A_LoopField) != ""
+                    partyCount++
+            }
+        }
+        sizeTarget := ResolveSquadTarget136(partyCount)
+        if TryClickDifficultyTarget(sizeTarget, w, h)
+            break
         Sleep(100)
     }
     return WaitForLobbyLoad()
@@ -9145,7 +10039,7 @@ CreateParty(x, y) {
 
     timerEnabled := false
     try {
-        SetTimer(CancelInviteIfAppeared, 7500)
+        SetRuntimeTimer136("CancelInviteIfAppeared", CancelInviteIfAppeared, 7500)
         timerEnabled := true
 
         search_bar := ""
@@ -9215,7 +10109,7 @@ CreateParty(x, y) {
     } finally {
         PartyInviteBusy := false
         if (timerEnabled)
-            SetTimer(CancelInviteIfAppeared, 0)
+            SetRuntimeTimer136("CancelInviteIfAppeared", CancelInviteIfAppeared, 0)
     }
 }
 
@@ -9379,8 +10273,115 @@ checkCondition(*) {
 
 }
 
+FindOverrideMapImage136(imagePath, w, h) {
+    ; Plain map PNGs are world/camera references, not override-menu thumbnails.
+    if !RegExMatch(imagePath, "i)_Selection\.png$") || !FileExist(imagePath)
+        return ""
+    x := Round(w * .3), y := Round(h * .25)
+    rw := Round(w * .4), rh := Round(h * .55)
+    result := AdvancedImageSearch(imagePath, x, y, rw, rh, .3, 2, .025)
+    return (result.status = "success" && result.score >= .85
+        && result.x >= x && result.x < x + rw && result.y >= y && result.y < y + rh) ? result : ""
+}
+
+ScrollOverrideMapForImage136(imagePath, direction, steps, w, h) {
+    Loop steps {
+        result := FindOverrideMapImage136(imagePath, w, h)
+        if IsObject(result)
+            return result
+        if (A_Index < steps) {
+            SendEvent("{" direction "}")
+            Sleep(180)
+        }
+    }
+    return ""
+}
+
+FindOverrideMapFromSummerCastle136(imagePath, w, h, searchBarX, searchBarY) {
+    ActivateRoblox()
+    if !ClickPlay136(searchBarX, searchBarY)
+        return ""
+    Send("^a")
+    Send("{Backspace}")
+    Sleep(MacroDelay("SearchList"))
+    MouseMove(Round(w * 0.5), Round(h * 0.6))
+
+    anchorImage := "Resources/Maps/Summer Castle.png"
+    anchor := FindOverrideMapImage136(anchorImage, w, h)
+    if !IsObject(anchor)
+        anchor := ScrollOverrideMapForImage136(anchorImage, "WheelDown", 30, w, h)
+    if !IsObject(anchor)
+        anchor := ScrollOverrideMapForImage136(anchorImage, "WheelUp", 30, w, h)
+    if !IsObject(anchor) {
+        RuntimeLogWarn("map_scroll_anchor_missing", "Summer Castle anchor was not found in the override map list")
+        return ""
+    }
+
+    RuntimeLogInfo("map_scroll_anchor_found", "Found the Summer Castle anchor; scanning the override list for the requested map",
+        "target_template=" imagePath)
+    result := ScrollOverrideMapForImage136(imagePath, "WheelDown", 30, w, h)
+    if IsObject(result)
+        return result
+
+    anchor := ScrollOverrideMapForImage136(anchorImage, "WheelUp", 30, w, h)
+    if !IsObject(anchor)
+        return ""
+    return ScrollOverrideMapForImage136(imagePath, "WheelUp", 30, w, h)
+}
+
+FillMapSearch136(mapName, w, h, &searchBarX, &searchBarY) {
+    try {
+        if !ActivateRoblox() || !GetRobloxScreenClientRect(&sx, &sy)
+            return false
+        x := Round(w * .3), y := Round(h * .14)
+        rw := Round(w * .4), rh := Round(h * .2)
+        loop 2 {
+            field := AdvancedImageSearch("Resources/searchbar.png", x, y, rw, rh, .5, 1.5, .025)
+            if field.status = "success" && field.score >= .85 {
+                searchBarX := field.x, searchBarY := field.y
+            } else {
+                text := ReadGameText136(sx + x, sy + y, rw, rh, {scale: 1.5, grayscale: 1})
+                label := ""
+                try label := text.FindString("Search for Maps", {CaseSense: false, IgnoreLinebreaks: true})
+                catch Error as labelErr {
+                    RuntimeLogInfo("map_search_label_miss", "Search field label was absent from this OCR sample",
+                        "attempt=" A_Index "; error=" labelErr.Message)
+                }
+                if !label || !OcrMatchTargetsGameUI(label, "Search for Maps") {
+                    if (A_Index < 2) {
+                        Sleep(200)
+                        continue
+                    }
+                    return false
+                }
+                searchBarX := Round(label.x + label.w / 2 - sx)
+                searchBarY := Round(label.y + label.h / 2 - sy)
+            }
+            if !ClickPlay136(searchBarX, searchBarY)
+                return false
+            Sleep(150)
+            SendEvent("^a")
+            SendEvent("{Backspace}")
+            SendText(mapName)
+            Sleep(350)
+            entered := ReadGameText136(sx + x, sy + Max(0, searchBarY - Round(h * .022)),
+                rw, Round(h * .045), {scale: 1.5, grayscale: 1})
+            wanted := StrLower(RegExReplace(mapName, "\s+", ""))
+            actual := StrLower(RegExReplace(entered.Text, "\s+", ""))
+            if InStr(actual, wanted) {
+                RuntimeLogInfo("map_search_text_confirmed", "Verified map name in the search field", "map=" mapName)
+                return true
+            }
+        }
+    } catch Error as err {
+        RuntimeLogWarn("map_search_input_failed", "Could not focus and verify map search", "error=" err.Message)
+    }
+    return false
+}
+
 SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
-    global gamemap, difficulty, modifiers, CheckTheMap, LegacyMode
+    global gamemap, difficulty, modifiers, CheckTheMap, LegacyMode, MapOverrideConfirmed136
+    MapOverrideConfirmed136 := false
 
     if !getRobloxPos(, , &w, &h) {
         RuntimeLogWarn("map_select_geometry_missing", "Roblox client geometry was unavailable before map selection")
@@ -9419,6 +10420,7 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
             }
         }
     } else {
+        ; Start each standard-mode override attempt from the known preset spawn point.
         ActivateRoblox()
         resetCharacter()
         Sleep(7500)
@@ -9580,35 +10582,14 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
         SendEvent("{sc012 up}")
         Sleep(MacroDelay("MapMenu"))
 
-        foundsearchbar := false
         getRobloxPos(&x, &y, &w, &h)
-        loop 2 {
-            if (!LegacyMode) {
-                res := AdvancedImageSearch("Resources/searchbar.png", Round(w * 0.1), 0, Round(w * 0.6), h, 0.5, 1.5)
-
-                if (res.status = "success" && res.score >= 0.6) {
-                    Click(res.x, res.y)
-                    foundsearchbar := true
-                    break
-                }
-            } else {
-                res := { x: ScaleX(810), y: ScaleY(218) }
-                click(Res.x, res.y)
-                foundsearchbar := true
-                break
-            }
-
-            Sleep(500)
-        }
-
-        if (!foundsearchbar) {
-            LogToConsole("Can not found the search bar in the override map menu! Reloading..", true)
+        searchBarX := 0, searchBarY := 0
+        if !FillMapSearch136(gamemap, w, h, &searchBarX, &searchBarY) {
+            RuntimeLogWarn("map_search_unconfirmed", "Map search text was not confirmed; no map card was clicked", "map=" gamemap)
+            LogToConsole("Could not focus the map search box and verify '" gamemap "'. Reloading...", true)
             SafeReload()
             return false
         }
-
-        Sleep(MacroDelay("SearchBox"))
-        SendText(gamemap)
         mapChoiceAttempts := 0
         loop {
             mapChoiceAttempts++
@@ -9619,17 +10600,21 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
                 return false
             }
             Sleep(MacroDelay("SearchList"))
-            if (InArray(SpecialMaps, gamemap)) {
-                SelectionICON := AdvancedImageSearch("Resources/Maps/" gamemap "_Selection.png", Round(w * 0.1), 0,
-                    Round(w * 0.7), h, 0.5, 1.5)
-
-                if (SelectionICON.score >= 0.65) {
-                    Click(SelectionICON.x, SelectionICON.y)
-                } else {
-                    Click(res.x - ScaleX(90), res.y + 80)
-                }
-            } else {
-                Click(res.x - ScaleX(90), res.y + 80)
+            selectionImage := "Resources/Maps/" gamemap "_Selection.png"
+            selectedByImage := false
+            cardMatch := FindOverrideMapImage136(selectionImage, w, h)
+            if IsObject(cardMatch) {
+                if !ClickPlay136(cardMatch.x, cardMatch.y)
+                    return false
+                selectedByImage := true
+                RuntimeLogInfo("map_card_image_selected", "Selected the filtered override map card by image",
+                    "map=" gamemap "; score=" cardMatch.score)
+            }
+            if !selectedByImage {
+                if !ClickPlay136(searchBarX - ScaleX(90), searchBarY + ScaleY(80))
+                    return false
+                RuntimeLogInfo("map_card_text_fallback", "Used the existing filtered text-search position",
+                    "map=" gamemap)
             }
             Sleep(MacroDelay("MenuClick"))
 
@@ -9653,13 +10638,11 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
                 LogToConsole(gamemap " is already in the current rotation. Clicking veto..", true)
                 resVeto := AdvancedImageSearch("Resources\Veto.png", 0, 0, w, h, 0.5, 1.5)
                 if (resVeto.status == "success" && resVeto.score > 0.65) {
-                    MouseMove(resVeto.x, resVeto.y)
-                    Sleep(30)
-                    MouseClick
+                    if !ClickPlay136(resVeto.x, resVeto.y)
+                        return false
                 } else {
-                    MouseMove(ScaleX(1152), ScaleY(834))
-                    Sleep(30)
-                    MouseClick
+                    if !ClickPlay136(ScaleX(1152), ScaleY(834))
+                        return false
                 }
                 Sleep(300)
                 Send("{" SC_E " down}")
@@ -9683,21 +10666,22 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
         if (modifiers != "")
             ApplyModifiers()
 
+        ; This relative route starts at the override NPC, not at respawn.
         Sleep(200)
         ActivateRoblox()
         Sleep(100)
         SendEvent("{sc020 down}")
         Sleep(1800)
         SendEvent("{sc020 up}")
-        Sleep(MacroDelay("WalkStep"))
+        Sleep(200)
         SendEvent("{sc01f down}")
         Sleep(1680)
         SendEvent("{sc01f up}")
-        Sleep(MacroDelay("WalkStep"))
+        Sleep(300)
         SendEvent("{sc020 down}")
         Sleep(1500)
         SendEvent("{sc020 up}")
-        Sleep(MacroDelay("WalkStep"))
+        Sleep(600)
         loop 3 {
             e_pr := AdvancedImageSearch("Resources\e_prompt.png", 0, 0, w, h, 0.6, 1.5)
 
@@ -9735,17 +10719,37 @@ SelectMap(readyX := ScaleX(963), readyY := ScaleY(838)) {
     }
     Sleep(100)
 
-    Click(readyX, readyY)
+    MapOverrideConfirmed136 := true
+    RuntimeLogInfo("map_selection_flow_confirmed", "Map selection and vote-board interaction completed",
+        "map=" gamemap)
+    if !ClickPlay136(readyX, readyY)
+        return false
     return waitReady()
 }
 
 CheckTheMapF() {
-    global gamemap, CheckTheMap, modifiers
+    global gamemap, CheckTheMap, modifiers, MapOverrideConfirmed136, MultiplayerEnabled, PlayerRole
+    global SolarNightLobbyConfirmed136
+    if ResolveSolarNight136() != "" {
+        if !SolarNightLobbyConfirmed136
+            RuntimeLogWarn("solar_map_unconfirmed", "Night I lobby was not confirmed")
+        return SolarNightLobbyConfirmed136
+    }
+
+    if (ResolveArcadeTarget() = "" && !(MultiplayerEnabled && PlayerRole = "Member")
+        && !MapOverrideConfirmed136) {
+        RuntimeLogWarn("map_selection_unconfirmed", "Ready blocked because map selection did not complete",
+            "map=" gamemap)
+        LogToConsole("Map selection was not confirmed. The macro will not vote Ready.", true)
+        SafeReload()
+        return false
+    }
 
     modifiers_str := (modifiers is Array) ? Join(modifiers) : String(modifiers)
 
-    if (ResolveArcadeTarget() = "" && FileExist("Resources\Maps\" . gamemap . ".png") && CheckTheMap = 1 && !InArray(SpecialMaps, gamemap) && !
-        RegExMatch(modifiers_str, "i)fog")) {
+    mapImage := "Resources\Maps\" . gamemap . ".png"
+    if (ResolveArcadeTarget() = "" && FileExist(mapImage) && !InArray(SpecialMaps, gamemap) &&
+        !RegExMatch(modifiers_str, "i)fog")) {
         if !AlignCamera(false, false, false) {
             SafeReload()
             return false
@@ -9790,10 +10794,14 @@ CheckTheMapF() {
         if (!FoundMap) {
             RuntimeLogWarn("map_detection_failed", "Configured map image was not detected",
                 "map=" gamemap "; score=" lastMapScore "; samples=" mapSamples "; camera_recoveries=" cameraRecoveries)
-            LogToConsole("Can't detect the map! Reloading script...", true)
-            Sleep 300
-            SafeReload()
-            return false
+            if MapOverrideConfirmed136 {
+                LogToConsole("Map image didn't match, but the override selection and vote-board prompt were confirmed. Continuing.", true)
+            } else {
+                LogToConsole("Map couldn't be verified and selection wasn't confirmed. Reloading...", true)
+                Sleep 300
+                SafeReload()
+                return false
+            }
         }
     }
 
@@ -9801,6 +10809,10 @@ CheckTheMapF() {
         functionName := gamemap . "Path"
 
         %functionName%()
+    } else if (ResolveArcadeTarget() = "" && !FileExist(mapImage)) {
+        RuntimeLogWarn("map_visual_verification_unavailable",
+            "No in-game map image exists for visual verification; relying on the confirmed map selection flow",
+            "map=" gamemap)
     }
     return true
 }
@@ -9865,7 +10877,8 @@ FindReadyButton(&foundX, &foundY) {
     rw := Round(w * 0.3)
     rh := Round(h * 0.3)
 
-    result := AdvancedImageSearch("Resources/ready_gs.png", rx, ry, rw, rh)
+    readyTemplate := ResolveSolarNight136() != "" ? "Resources/Night 1 Ready.png" : "Resources/ready_gs.png"
+    result := AdvancedImageSearch(readyTemplate, rx, ry, rw, rh)
     if (result.status = "success" && result.score > 0.7) {
         foundX := result.x
         foundY := result.y
@@ -9878,7 +10891,17 @@ FindReadyButton(&foundX, &foundY) {
 }
 
 ClickReady() {
-    global readyX, readyY
+    global readyX, readyY, MapOverrideConfirmed136, MultiplayerEnabled, PlayerRole
+    global SolarNightLobbyConfirmed136
+    if ResolveSolarNight136() != "" && !SolarNightLobbyConfirmed136
+        return false
+
+    if (ResolveSolarNight136() = "" && ResolveArcadeTarget() = "" && !(MultiplayerEnabled && PlayerRole = "Member")
+        && !MapOverrideConfirmed136) {
+        LogToConsole("Map selection was not confirmed. The macro will not vote Ready.", true)
+        RuntimeLogWarn("ready_blocked_unconfirmed_map", "Ready blocked because the map selection flow was incomplete")
+        return false
+    }
 
     readyDeadline := A_TickCount + 8000
     attempts := 0
@@ -9890,9 +10913,11 @@ ClickReady() {
             continue
         }
 
-        MouseMove(readyX, readyY)
-        Sleep 50
-        MouseClick()
+        if !ClickPlay136(readyX, readyY) {
+            RuntimeLogWarn("ready_click_failed", "Could not focus Roblox to press Ready", "attempt=" attempts)
+            Sleep(250)
+            continue
+        }
         Sleep 250
 
         disappearedSamples := 0
@@ -10025,7 +11050,7 @@ activateTimescale() {
         return true
     }
 
-    if (!UseTimeScale || ResolveArcadeTarget() != "")
+    if (!UseTimeScale || ResolveArcadeTarget() != "" || ResolveSolarNight136() != "")
         return true
 
     if !getRobloxPos(&x, &y, &w, &h) {
@@ -10057,13 +11082,12 @@ activateTimescale() {
     }
 
     if (dialogKind = "") {
-        LogToConsole("Failed to activate timescale: the confirm/get more dialog never appeared. Stopping safely.", true)
+        LogToConsole("TimeScale dialog unavailable; continuing without TimeScale.", true)
         RuntimeLogWarn("timescale_dialog_unavailable", "TimeScale dialog never appeared after bounded retries",
             "attempts=" maxOpenAttempts)
         CloseTimescaleNavigation()
         TimescaleActive := false
-        StopStrategy()
-        return false
+        return true
     }
 
     if (dialogKind = "getmore") {
@@ -10094,13 +11118,12 @@ activateTimescale() {
     }
 
     if (closedSamples < 2) {
-        LogToConsole("Timescale confirmation could not be verified. Stopping safely.", true)
+        LogToConsole("TimeScale confirmation uncertain; continuing without claiming a ticket was used.", true)
         RuntimeLogWarn("timescale_confirmation_ambiguous",
             "TimeScale confirmation did not settle after the confirm click")
         CloseTimescaleNavigation()
         TimescaleActive := false
-        StopStrategy()
-        return false
+        return true
     }
 
     timescales := IniRead(StateFile, "State", "Timescale", 0)
@@ -10209,9 +11232,144 @@ AlignCamera(move := true, skipZoom := false, log := true) {
     return true
 }
 
+BlockAutoRunOnPendingPlacement136(&autoRun) {
+    global StateFile
+
+    if (Integer(autoRun) != 1 || Integer(IniRead(StateFile, "Recovery", "PlacementPending", 0)) != 1)
+        return ""
+
+    towerID := IniRead(StateFile, "Recovery", "PlacementTower", "unknown")
+    requestedX := IniRead(StateFile, "Recovery", "PlacementRequestedX", "unknown")
+    requestedY := IniRead(StateFile, "Recovery", "PlacementRequestedY", "unknown")
+    attemptX := IniRead(StateFile, "Recovery", "PlacementAttemptX", "unknown")
+    attemptY := IniRead(StateFile, "Recovery", "PlacementAttemptY", "unknown")
+    attempts := IniRead(StateFile, "Recovery", "PlacementAttempt", "unknown")
+    hudTowerCount := IniRead(StateFile, "Recovery", "PlacementTowerCount", "unknown")
+    strategyTowerIDCount := IniRead(StateFile, "Recovery", "PlacementStrategyTowerIdCount", "unknown")
+
+    ; A restarted process must never rerun a strategy after an unverified placement input.
+    autoRun := 0
+    IniWrite(0, StateFile, "State", "Running")
+    IniWrite(1, StateFile, "Recovery", "PlacementInterrupted")
+    screenshotPath := SavePlacementFailureEvidence136(towerID, requestedX, requestedY,
+        attemptX, attemptY, attempts, "process_restarted_with_pending_placement")
+    details := "tower=" towerID "; requested=" requestedX "," requestedY
+        . "; attempted=" attemptX "," attemptY "; attempt=" attempts
+        . "; hud_placed_tower_count=" hudTowerCount "; strategy_tower_id_count=" strategyTowerIDCount
+        . "; screenshot=" screenshotPath
+    RuntimeLogError("placement_autorun_blocked",
+        "Automatic strategy restart was blocked because a tower placement was still unconfirmed", details)
+    return "The previous run stopped while a tower placement was unconfirmed."
+        . "`nNo placement was resumed. Roblox has been left open."
+        . "`nTower: " towerID " | attempted: " attemptX ", " attemptY
+        . "`nHUD tower count: " hudTowerCount " | strategy tower IDs: " strategyTowerIDCount
+        . " | evidence: " screenshotPath
+        . "`nCheck the visible game state before starting another run."
+}
+
+MarkPlacementPending136(towerID, requestedX, requestedY, attemptX, attemptY, attempt) {
+    global StateFile, Towers
+    hudPlacedCount := 0
+    hudCapacity := 0
+    hudCounterText := ""
+    hudCounterOCRMs := 0
+    hudCountKnown := ReadRobloxPlacedTowerCount136(&hudPlacedCount, &hudCapacity,
+        &hudCounterText, &hudCounterOCRMs)
+    hudCountLabel := hudCountKnown ? hudPlacedCount "/" hudCapacity : "unknown"
+
+    IniWrite(1, StateFile, "Recovery", "PlacementPending")
+    IniWrite(towerID, StateFile, "Recovery", "PlacementTower")
+    IniWrite(requestedX, StateFile, "Recovery", "PlacementRequestedX")
+    IniWrite(requestedY, StateFile, "Recovery", "PlacementRequestedY")
+    IniWrite(attemptX, StateFile, "Recovery", "PlacementAttemptX")
+    IniWrite(attemptY, StateFile, "Recovery", "PlacementAttemptY")
+    IniWrite(attempt, StateFile, "Recovery", "PlacementAttempt")
+    IniWrite(hudCountKnown ? hudPlacedCount : "unknown", StateFile, "Recovery", "PlacementTowerCount")
+    IniWrite(Towers.Count, StateFile, "Recovery", "PlacementStrategyTowerIdCount")
+    RuntimeLogInfo("placement_input_pending", "Saved recovery state before sending a tower placement click",
+        "tower=" towerID "; requested=" requestedX "," requestedY
+        . "; attempted=" attemptX "," attemptY "; attempt=" attempt
+        . "; hud_placed_tower_count=" hudCountLabel
+        . "; strategy_tower_id_count=" Towers.Count "; hud_count_ocr_ms=" hudCounterOCRMs)
+}
+
+ClearPlacementPending136() {
+    global StateFile
+    IniWrite(0, StateFile, "Recovery", "PlacementPending")
+}
+
+SavePlacementFailureEvidence136(towerID, requestedX, requestedY, attemptX, attemptY, attempts, verification) {
+    global Towers
+
+    knownTowerIDs := []
+    for id, tower in Towers
+        knownTowerIDs.Push(id)
+
+    logDir := A_AppData "\Ultimate_Macro\Logs"
+    try {
+        if !DirExist(logDir)
+            DirCreate(logDir)
+    } catch Error {
+    }
+
+    safeTowerID := RegExReplace(towerID, "[^A-Za-z0-9_-]", "_")
+    screenshotPath := logDir "\placement-uncertain-" safeTowerID "-" FormatTime(A_Now, "yyyyMMdd-HHmmss") ".png"
+    screenshotSaved := false
+    bitmap := 0
+    try {
+        bitmap := CaptureRobloxClientBitmap()
+        if bitmap {
+            screenshotSaved := Gdip_SaveBitmapToFile(bitmap, screenshotPath) = 0
+            Gdip_DisposeImage(bitmap)
+            bitmap := 0
+        }
+    } catch Error as captureError {
+        RuntimeLogWarn("placement_screenshot_failed", "Could not save the Roblox screenshot for an uncertain placement",
+            "tower=" towerID "; error=" captureError.Message)
+    }
+
+    if !screenshotSaved
+        screenshotPath := "unavailable"
+    details := "tower=" towerID "; requested=" requestedX "," requestedY
+        . "; attempted=" attemptX "," attemptY "; retries=" attempts
+        . "; verification=" verification "; strategy_tower_id_count=" knownTowerIDs.Length
+        . "; strategy_tower_ids=" (knownTowerIDs.Length ? Join(knownTowerIDs) : "none")
+        . "; screenshot=" screenshotPath
+    RuntimeLogError("placement_uncertain_stopped", "Stopped before continuing an unconfirmed tower placement", details)
+    return screenshotPath
+}
+
+StopForUncertainPlacement136(towerID, requestedX, requestedY, attemptX, attemptY, attempts, verification) {
+    global RunningStrategy, StateFile, MainGui, canUseAbility
+
+    RunningStrategy := false
+    canUseAbility := true
+    try IniWrite(0, StateFile, "State", "Running")
+    try StopRuntimeTimers()
+    try ReleaseHeldInput()
+    try KillSubmacros()
+
+    screenshotPath := SavePlacementFailureEvidence136(
+        towerID, requestedX, requestedY, attemptX, attemptY, attempts, verification)
+    ClearPlacementPending136()
+    alertText := "Strategy stopped because the placement for " towerID " is uncertain."
+    alertText .= "`nRoblox is still open and no more placement clicks were sent."
+    alertText .= "`nRequested: " requestedX ", " requestedY
+    alertText .= "`nAttempted: " attemptX ", " attemptY " (" attempts " retries)"
+    alertText .= "`nVerification: " verification
+    alertText .= "`nScreenshot: " screenshotPath
+    LogToConsole(alertText, true, false)
+    if IsSet(MainGui) && MainGui {
+        try MainGui.Show()
+        try ModernMsgBox("Placement needs review", alertText, "OK", "WARNING")
+    }
+    return false
+}
+
 SpawnTower(X, Y, slotNumber, towerID) {
     global Towers, LastOpenedTowerID, CancelPlacementKey, canUseAbility, UseNumbersForHotbar
     global RunningStrategy, needtocheckTowerUI, unfocusX, unfocusY
+    originalX := X, originalY := Y
     if (IsSet(RunningStrategy) && !RunningStrategy)
         return false
     LogToConsole("Placing tower " towerID " (slot " slotNumber ") at x:" X " y:" Y "...")
@@ -10226,7 +11384,7 @@ SpawnTower(X, Y, slotNumber, towerID) {
     }
 
     placeAttempts := 0
-    maxPlacementAttempts := 9
+    maxPlacementAttempts := 13
     startTime := A_TickCount
     canUseAbility := false
 
@@ -10234,7 +11392,7 @@ SpawnTower(X, Y, slotNumber, towerID) {
     rejectedPositions := Map()
     targetIndex := 0
     samePositionAttempts := 0
-    maxSameSpotRetries := 8
+    spaceRejectedRecordedSpot := false
 
     needsHotbarSelection := true
 
@@ -10245,8 +11403,10 @@ SpawnTower(X, Y, slotNumber, towerID) {
         }
 
         if (A_TickCount - startTime > 300000) {
-            LogToConsole("Tower placement timed out (5+ minutes). Reloading the macro...")
-            SafeReload()
+            timeoutX := (IsSet(currentX) && currentX != "") ? currentX : X
+            timeoutY := (IsSet(currentY) && currentY != "") ? currentY : Y
+            StopForUncertainPlacement136(towerID, originalX, originalY, timeoutX, timeoutY,
+                samePositionAttempts, "placement_timeout")
             return false
         }
 
@@ -10262,39 +11422,42 @@ SpawnTower(X, Y, slotNumber, towerID) {
         }
 
         if (currentX = "") {
-            LogToConsole("Tower " towerID " has no untried placement positions left.", true)
-            RuntimeLogWarn("placement_targets_exhausted", "Every candidate placement position was rejected",
-                "tower=" towerID "; attempts=" placeAttempts)
-            SendEvent("{" CancelPlacementKey "}")
-            canUseAbility := true
+            StopForUncertainPlacement136(towerID, originalX, originalY, X, Y, placeAttempts,
+                "all_candidate_positions_rejected")
             return false
         }
 
         placeAttempts++
         if (placeAttempts > maxPlacementAttempts) {
-            LogToConsole("Tower " towerID " placement exceeded the bounded retry budget.", true)
-            RuntimeLogWarn("placement_retry_exhausted", "Placement stopped after bounded retries",
-                "tower=" towerID "; attempts=" (placeAttempts - 1))
-            SendEvent("{" CancelPlacementKey "}")
-            canUseAbility := true
+            StopForUncertainPlacement136(towerID, originalX, originalY, currentX, currentY,
+                placeAttempts - 1, "placement_retry_budget_exhausted")
             return false
         }
 
         ActivateRoblox()
+
+        preflightTowerCost := 0
+        preflightCash := 0
+        fundsPreflightResult := WaitForHotbarPlacementFunds136(towerID, slotNumber,
+            &preflightTowerCost, &preflightCash)
+        if (fundsPreflightResult = "cancelled") {
+            canUseAbility := true
+            return false
+        }
+        if (fundsPreflightResult = "timeout") {
+            StopForPlacementFundsTimeout136(towerID, slotNumber, preflightTowerCost,
+                preflightCash, originalX, originalY, currentX, currentY)
+            return false
+        }
 
         if (needsHotbarSelection) {
             if waitForTowerUI(, , 120) {
                 Click(ScaleX(unfocusX), ScaleY(unfocusY))
                 Sleep(100)
                 if !WaitForTowerUIClosed(2500) {
-                    Towers[towerID] := { x: X, y: TowerY, slot: Integer(slotNumber), level: 0, path: 0, pathLevel: 0,
-                        target: "First Enemy", pendingPlacement: true }
-                    LogToConsole("Tower " towerID " placement is still uncertain; existing tower UI did not close. Continuing without another click.", true)
-                    RuntimeLogWarn("placement_pending_precondition", "Prior tower panel stayed visible during placement precondition",
-                        "tower=" towerID)
-                    SendEvent("{" CancelPlacementKey "}")
-                    canUseAbility := true
-                    return true
+                    StopForUncertainPlacement136(towerID, originalX, originalY, currentX, currentY,
+                        placeAttempts, "previous_tower_panel_did_not_close")
+                    return false
                 }
             }
             LastOpenedTowerID := ""
@@ -10309,7 +11472,7 @@ SpawnTower(X, Y, slotNumber, towerID) {
                 continue
             }
 
-            Sleep((PotatoMode = 1) ? 100 : 30)
+            Sleep((PotatoMode = 1) ? TurboDelay136(100) : 30)
             needsHotbarSelection := false
         }
 
@@ -10317,55 +11480,156 @@ SpawnTower(X, Y, slotNumber, towerID) {
             LogToConsole("Retrying tower " towerID " at untried position x:" currentX " y:" currentY "...")
 
         MouseMove(currentX, currentY, A_DefaultMouseSpeed)
-        Sleep((PotatoMode = 1) ? 100 : 40)
+        Sleep((PotatoMode = 1) ? TurboDelay136(100) : 40)
+        MarkPlacementPending136(towerID, originalX, originalY, currentX, currentY,
+            samePositionAttempts + 1)
         MouseClick()
         Sleep(100)
-        SendEvent("{" CancelPlacementKey "}")
 
-        placedSuccessfully := waitForTowerUI(&resV2, , 5000)
+        uiStart136 := A_TickCount
+        placementStatus := "unknown"
+        missingCash := 0
+        placedSuccessfully := false
+        cashScanCount136 := 0
+        lastCashScanMs136 := 0
+        lastCashScanText136 := ""
+        cashToastDeadline := uiStart136 + 5000
+        nextCashOCRAt := uiStart136
+        loop {
+            if waitForTowerUI(&resV2, , 120) {
+                placedSuccessfully := true
+                break
+            }
+            if (A_TickCount >= nextCashOCRAt) {
+                nextCashOCRAt := A_TickCount + 500
+                cashScanCount136++
+                warningText136 := ""
+                if IsPlacementInsufficientFunds(&missingCash, &warningText136, &lastCashScanMs136) {
+                    placementStatus := "funds"
+                    detectedCash136 := 0
+                    cashBalanceOCRMs136 := 0
+                    ReadRobloxCashBalance136(&detectedCash136, , &cashBalanceOCRMs136)
+                    hudPlacedCount136 := 0
+                    hudCapacity136 := 0
+                    hudCountOCRMs136 := 0
+                    hudCountKnown136 := ReadRobloxPlacedTowerCount136(&hudPlacedCount136,
+                        &hudCapacity136, , &hudCountOCRMs136)
+                    hudCountLabel136 := hudCountKnown136 ? hudPlacedCount136 "/" hudCapacity136 : "unknown"
+                    warningScreenshot136 := SavePlacementCashEvidence136("warning", towerID,
+                        slotNumber, currentX, currentY, detectedCash136, missingCash)
+                    RuntimeLogInfo("placement_funds_warning_detected",
+                        "Detected the temporary insufficient-cash toast before the slower placement timeout",
+                        "tower=" towerID "; slot=" slotNumber "; deficit=" missingCash
+                        . "; cash=" detectedCash136 "; hud_placed_tower_count=" hudCountLabel136
+                        . "; strategy_tower_id_count=" Towers.Count
+                        . "; scan_ms=" lastCashScanMs136 "; cash_ocr_ms=" cashBalanceOCRMs136
+                        . "; hud_count_ocr_ms=" hudCountOCRMs136
+                        . "; warning_text=" StrReplace(SubStr(warningText136, 1, 180), "`n", " ")
+                        . "; decision=wait_for_funds; screenshot=" warningScreenshot136)
+                    break
+                }
+                if IsPlacementExplicitlyRejectedText136(warningText136) {
+                    placementStatus := "space"
+                    spaceScreenshot136 := SavePlacementCashEvidence136("space-warning", towerID,
+                        slotNumber, currentX, currentY, preflightCash, preflightTowerCost)
+                    RuntimeLogInfo("placement_space_rejected",
+                        "Classified a blocked placement from the same OCR frame used for the cash check",
+                        "tower=" towerID "; slot=" slotNumber "; x=" currentX "; y=" currentY
+                        . "; scan_ms=" lastCashScanMs136 "; cash=" preflightCash
+                        . "; tower_cost=" preflightTowerCost "; strategy_tower_id_count=" Towers.Count
+                        . "; warning_text=" StrReplace(SubStr(warningText136, 1, 180), "`n", " ")
+                        . "; decision=try_next_bounded_position; screenshot=" spaceScreenshot136)
+                    break
+                }
+                lastCashScanText136 := warningText136
+            }
+            if (A_TickCount >= cashToastDeadline)
+                break
+            Sleep(50)
+        }
+        cashScanScreenshot136 := ""
+        if (cashScanCount136 && placementStatus != "funds" && placementStatus != "space") {
+            lastObservedCash136 := preflightCash
+            cashBalanceOCRMs136 := 0
+            ReadRobloxCashBalance136(&lastObservedCash136, , &cashBalanceOCRMs136)
+            hudPlacedCount136 := 0
+            hudCapacity136 := 0
+            hudCountOCRMs136 := 0
+            hudCountKnown136 := ReadRobloxPlacedTowerCount136(&hudPlacedCount136,
+                &hudCapacity136, , &hudCountOCRMs136)
+            hudCountLabel136 := hudCountKnown136 ? hudPlacedCount136 "/" hudCapacity136 : "unknown"
+            cashScanScreenshot136 := SavePlacementCashEvidence136("warning-not-seen", towerID,
+                slotNumber, currentX, currentY, lastObservedCash136, 0)
+            RuntimeLogInfo("placement_cash_scan_summary",
+                "No insufficient-cash warning matched during the post-click observation window",
+                "tower=" towerID "; slot=" slotNumber "; samples=" cashScanCount136
+                . "; last_scan_ms=" lastCashScanMs136 "; cash_ocr_ms=" cashBalanceOCRMs136
+                . "; last_text=" StrReplace(SubStr(lastCashScanText136, 1, 180), "`n", " ")
+                . "; cash=" lastObservedCash136 "; tower_cost=" preflightTowerCost
+                . "; hud_placed_tower_count=" hudCountLabel136 "; hud_count_ocr_ms=" hudCountOCRMs136
+                . "; strategy_tower_id_count=" Towers.Count "; decision=continue_to_verification"
+                . "; screenshot=" cashScanScreenshot136)
+        }
+        RuntimeLogInfo("placement_ui_wait", "Placement response observation completed",
+            "tower=" towerID "; elapsed_ms=" (A_TickCount - uiStart136) "; seen=" placedSuccessfully
+            . "; cash_scans=" cashScanCount136 "; last_cash_scan_ms=" lastCashScanMs136
+            . "; preflight_cost=" preflightTowerCost "; preflight_cash=" preflightCash
+            . "; strategy_tower_id_count=" Towers.Count "; decision=" (placedSuccessfully ? "placed" : placementStatus))
+        TurboObserve136(A_TickCount - uiStart136, placedSuccessfully)
 
         if (!placedSuccessfully) {
-            placementStatus := ResolvePlacementAmbiguity(towerID, &resV2)
+            if (placementStatus != "funds" && placementStatus != "space")
+                placementStatus := ResolvePlacementAmbiguity(towerID, &resV2, &missingCash)
             if (placementStatus = "success") {
                 placedSuccessfully := true
             } else if (placementStatus = "cancelled") {
+                ClearPlacementPending136()
                 canUseAbility := true
                 return false
             } else if (placementStatus = "funds") {
+                if !HandlePlacementFunds136(towerID, missingCash, originalX, originalY,
+                    currentX, currentY, placeAttempts)
+                    return false
                 samePositionAttempts := 0
-                LogToConsole("Tower " towerID " is waiting for enough cash; keeping the recorded position.")
-                RuntimeLogInfo("placement_waiting_for_funds",
-                    "Placement was blocked by insufficient funds, so coordinates were preserved",
-                    "tower=" towerID "; x=" currentX "; y=" currentY)
-                SendEvent("{" CancelPlacementKey "}")
                 needsHotbarSelection := true
                 targetIndex--
                 placeAttempts--
-                Sleep(1500)
+                Sleep(100)
                 continue
             } else if (placementStatus = "unknown") {
-                if (samePositionAttempts < maxSameSpotRetries) {
-                    samePositionAttempts++
-                    LogToConsole("Tower " towerID " placement is unconfirmed; keeping the recorded spot.")
-                    RuntimeLogInfo("placement_retry_same_position",
-                        "Placement was unconfirmed without a space rejection, so the recorded position is kept",
-                        "tower=" towerID "; x=" currentX "; y=" currentY "; attempt=" samePositionAttempts)
-                    SendEvent("{" CancelPlacementKey "}")
-                    needsHotbarSelection := true
-                    targetIndex--
-                    placeAttempts--
-                    Sleep(750)
-                    continue
+                ; One final tower-panel check distinguishes an already-placed tower
+                ; from a genuinely unresolved click before we stop the strategy.
+                if waitForTowerUI(&resV2, , 2500) {
+                    placedSuccessfully := true
+                    RuntimeLogInfo("placement_final_verification", "Tower UI appeared during the final verification",
+                        "tower=" towerID "; x=" currentX "; y=" currentY)
+                } else {
+                    placementStatus := GetPlacementFailureReason(&missingCash)
+                    if (placementStatus = "funds") {
+                        if !HandlePlacementFunds136(towerID, missingCash, originalX, originalY,
+                            currentX, currentY, placeAttempts)
+                            return false
+                        samePositionAttempts := 0
+                        needsHotbarSelection := true
+                        targetIndex--
+                        placeAttempts--
+                        Sleep(100)
+                        continue
+                    }
+                    if (placementStatus = "space") {
+                        ClearPlacementPending136()
+                        spaceRejectedRecordedSpot := true
+                        RuntimeLogInfo("placement_space_rejected", "Final verification confirmed the recorded coordinates were blocked",
+                            "tower=" towerID "; x=" currentX "; y=" currentY)
+                    } else {
+                        StopForUncertainPlacement136(towerID, originalX, originalY, currentX, currentY,
+                            samePositionAttempts + 1, "tower_ui=missing; failure_hint=unknown")
+                        return false
+                    }
                 }
-
-                LogToConsole("Tower " towerID " placement could not be confirmed; stopping rather than shifting the strategy.", true)
-                RuntimeLogWarn("placement_unknown_exhausted",
-                    "Placement remained unknown after bounded same-position retries; coordinates were not changed",
-                    "tower=" towerID "; x=" currentX "; y=" currentY "; attempts=" samePositionAttempts)
-                SendEvent("{" CancelPlacementKey "}")
-                canUseAbility := true
-                return false
             } else if (placementStatus = "space") {
+                ClearPlacementPending136()
+                spaceRejectedRecordedSpot := true
                 RuntimeLogInfo("placement_space_rejected",
                     "TDS explicitly rejected the recorded position; trying the next bounded offset",
                     "tower=" towerID "; x=" currentX "; y=" currentY)
@@ -10373,11 +11637,28 @@ SpawnTower(X, Y, slotNumber, towerID) {
         }
 
         if (placedSuccessfully) {
+            ClearPlacementPending136()
+            hudPlacedCount136 := 0
+            hudCapacity136 := 0
+            hudCountOCRMs136 := 0
+            if ReadRobloxPlacedTowerCount136(&hudPlacedCount136, &hudCapacity136, , &hudCountOCRMs136) {
+                RuntimeLogInfo("placement_hud_tower_count_verified",
+                    "Read the game's placed-tower counter after placement confirmation",
+                    "tower=" towerID "; hud_placed_tower_count=" hudPlacedCount136 "/" hudCapacity136
+                    . "; strategy_tower_id_count=" Towers.Count "; hud_count_ocr_ms=" hudCountOCRMs136
+                    . "; decision=placed")
+            }
             storedY := currentY
             if (currentY < h * 0.5)
                 storedY := currentY - ScaleY(5)
             Towers[towerID] := { x: currentX, y: storedY, slot: Integer(slotNumber), level: 0, path: 0, pathLevel: 0,
                 target: "First Enemy" }
+            try PlacementReview136(towerID, slotNumber, X, Y, currentX, currentY)
+            if (spaceRejectedRecordedSpot && (Round(currentX) != Round(X) || Round(currentY) != Round(Y))) {
+                if PersistPlacementCorrection136(originalX, originalY, slotNumber, towerID, currentX, currentY) {
+                    LogToConsole("Saved the confirmed placement for " towerID " to this strategy's next run.", true)
+                }
+            }
             LogToConsole("Tower " towerID " placed successfully")
             LastOpenedTowerID := towerID
             break
@@ -10395,6 +11676,89 @@ SpawnTower(X, Y, slotNumber, towerID) {
     return true
 }
 
+PersistPlacementCorrection136(originalX, originalY, slotNumber, towerID, placedX, placedY) {
+    global StateFile, StrategyWidth, StrategyHeight
+    strategyPath := IniRead(StateFile, "State", "Strategy", "")
+    if (!RegExMatch(strategyPath, "i)\.strat$") || !FileExist(strategyPath)
+        || !GetRobloxScreenClientRect(, , &clientW, &clientH) || clientW <= 0 || clientH <= 0) {
+        RuntimeLogWarn("placement_correction_not_saved", "The confirmed placement could not be mapped to a writable strategy step",
+            "tower=" towerID)
+        return false
+    }
+
+    hwnd := GetRobloxHWND()
+    baseX := Round(placedX * StrategyWidth / clientW)
+    baseY := Round(placedY * (StrategyHeight = 1090 ? 1009 : StrategyHeight) / clientH)
+    if (hwnd && StrategyWidth = 1920 && StrategyHeight = 1090) {
+        try {
+            WinGetClientPos(&clientX, &clientY, , , "ahk_id " hwnd)
+            WinGetPos(&windowX, &windowY, , , "ahk_id " hwnd)
+            baseX += clientX - windowX
+            baseY += clientY - windowY
+        }
+    }
+
+    try {
+        text := FileRead(strategyPath, "UTF-8")
+        inSteps := false
+        matchCount := 0
+        for _, line in StrSplit(text, Chr(10)) {
+            cleanLine := RTrim(line, Chr(13))
+            if RegExMatch(Trim(cleanLine), "i)^\[Steps\]$") {
+                inSteps := true
+                continue
+            }
+            if RegExMatch(Trim(cleanLine), "i)^\[") {
+                inSteps := false
+                continue
+            }
+            if inSteps && RegExMatch(cleanLine,
+                "i)^([ \t]*SpawnTower\([ \t]*)(\d+)([ \t]*,[ \t]*)(\d+)([ \t]*,[ \t]*)(\d+)([ \t]*,[ \t]*)([^,)]+?)([ \t]*\).*)$", &step) {
+                sameTower := StrLower(Trim(StrReplace(step[8], Chr(34)))) = StrLower(towerID)
+                if (sameTower && Integer(step[2]) = Integer(originalX)
+                    && Integer(step[4]) = Integer(originalY) && Integer(step[6]) = Integer(slotNumber)) {
+                    replacement := step[1] baseX step[3] baseY step[5] step[6] step[7] step[8] step[9]
+                    replaceCount := 0
+                    text := StrReplace(text, cleanLine, replacement, , &replaceCount)
+                    if replaceCount != 1
+                        throw Error("Placement step was not unique in the selected strategy.")
+                    matchCount++
+                    break
+                }
+            }
+        }
+        if matchCount != 1 {
+            RuntimeLogWarn("placement_correction_not_saved", "No unique matching tower step was found; strategy file was left unchanged",
+                "tower=" towerID "; x=" originalX "; y=" originalY)
+            return false
+        }
+
+        backupPath := strategyPath ".before-placement-fix.bak"
+        tempPath := strategyPath ".placement-fix.tmp"
+        if !FileExist(backupPath)
+            FileCopy(strategyPath, backupPath)
+        if FileExist(tempPath)
+            FileDelete(tempPath)
+        signatureFile := FileOpen(strategyPath, "r")
+        signature := Buffer(3, 0)
+        signatureBytes := signatureFile.RawRead(signature, 3)
+        signatureFile.Close()
+        hasBom := signatureBytes = 3 && NumGet(signature, 0, "UChar") = 0xEF
+            && NumGet(signature, 1, "UChar") = 0xBB && NumGet(signature, 2, "UChar") = 0xBF
+        FileAppend(text, tempPath, hasBom ? "UTF-8" : "UTF-8-RAW")
+        FileMove(tempPath, strategyPath, 1)
+        RuntimeLogInfo("placement_correction_saved", "Confirmed space rejection corrected the active strategy step",
+            "tower=" towerID "; x=" originalX "->" baseX "; y=" originalY "->" baseY)
+        return true
+    } catch Error as err {
+        try if FileExist(strategyPath ".placement-fix.tmp")
+            FileDelete(strategyPath ".placement-fix.tmp")
+        RuntimeLogWarn("placement_correction_not_saved", "Confirmed placement was used for this run but the strategy update failed",
+            "tower=" towerID "; error=" err.Message)
+        return false
+    }
+}
+
 PlacementPositionKey(px, py) {
     return Round(px) "," Round(py)
 }
@@ -10402,7 +11766,7 @@ PlacementPositionKey(px, py) {
 BuildPlacementTargets(baseX, baseY) {
     targets := [[Round(baseX), Round(baseY)]]
 
-    for radius in [5, 10, 20] {
+    for radius in [12, 24, 36] {
         rx := Max(2, ScaleX(radius))
         ry := Max(2, ScaleY(radius))
         for offset in [[0, -ry], [rx, 0], [0, ry], [-rx, 0], [rx, -ry], [rx, ry], [-rx, ry], [-rx, -ry]]
@@ -10430,38 +11794,410 @@ IsPlacementExplicitlyRejected() {
         if blockedByImage
             return true
 
-        return ReadMessage(,
-            "(?:cannot|can.?t|cant)\s+(?:place|put)(?:\s+(?:the|this|a|an|unit|tower))?\s+(?:here|there)"
-            . "|(?:this|that)\s+(?:spot|space|area)\s+(?:is\s+)?(?:blocked|invalid)"
-            . "|(?:no|not\s+enough)\s+(?:space|room)")
+        return ReadMessage(, PlacementRejectedPattern136())
     } catch Error {
         return false
     }
 }
 
-IsPlacementInsufficientFunds() {
+PlacementRejectedPattern136() {
+    return "(?:cannot|can.?t|cant)\s+(?:place|put)(?:\s+(?:the|this|a|an|unit|tower))?\s+(?:here|there)"
+        . "|(?:this|that)\s+(?:spot|space|area)\s+(?:is\s+)?(?:blocked|invalid)"
+        . "|(?:no|not\s+enough)\s+(?:space|room)"
+}
+
+IsPlacementExplicitlyRejectedText136(ocrText) {
+    return RegExMatch(ocrText, "i)" PlacementRejectedPattern136())
+}
+
+ReadRobloxHotbarTowerCost136(slotNumber, &towerCost := 0, &recognizedText := "", &elapsedMs := 0) {
+    towerCost := 0
+    recognizedText := ""
+    elapsedMs := 0
     try {
-        return ReadMessage(,
+        slot := Integer(slotNumber)
+        if (slot < 1 || slot > 5 || !GetRobloxScreenClientRect(&clientX, &clientY, &clientW, &clientH))
+            return false
+
+        cropW := Max(40, Round(clientW * 0.0375))
+        cropH := Max(24, Round(clientH * 0.0389))
+        centerX := Round(clientW * 0.5026 + (slot - 3) * clientW * 0.0422)
+        centerY := Round(clientH * 0.973)
+        cropX := clientX + centerX - Round(cropW / 2)
+        cropY := clientY + centerY - Round(cropH / 2)
+
+        pBitmap := Gdip_BitmapFromScreen(cropX "|" cropY "|" cropW "|" cropH)
+        if !pBitmap
+            return false
+        hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmap)
+        if !hBitmap
+            return false
+
+        ocrStarted := A_TickCount
+        recognizedText := OCR.FromBitmap(hBitmap, { lang: "en-US", scale: 4, grayscale: 0 }).Text
+        elapsedMs := A_TickCount - ocrStarted
+        towerCost := ParsePlacementCashBalance136(recognizedText)
+        return towerCost > 0
+    } catch Error as err {
+        RuntimeLogWarn("placement_price_ocr_failed", "Could not read the selected hotbar price",
+            "slot=" slotNumber "; error=" err.Message)
+        return false
+    } finally {
+        if IsSet(hBitmap) && hBitmap
+            DeleteObject(hBitmap)
+        if IsSet(pBitmap) && pBitmap
+            Gdip_DisposeImage(pBitmap)
+    }
+}
+
+ReadRobloxPlacedTowerCount136(&placedCount := 0, &capacity := 0, &recognizedText := "", &elapsedMs := 0) {
+    placedCount := 0
+    capacity := 0
+    recognizedText := ""
+    elapsedMs := 0
+    pBitmap := 0
+    hBitmap := 0
+    try {
+        if !GetRobloxScreenClientRect(&clientX, &clientY, &clientW, &clientH)
+            return false
+
+        cropX := clientX + Round(clientW * 0.6224)
+        cropY := clientY + Round(clientH * 0.9444)
+        cropW := Max(40, Round(clientW * 0.0573))
+        cropH := Max(24, Round(clientH * 0.0509))
+        pBitmap := Gdip_BitmapFromScreen(cropX "|" cropY "|" cropW "|" cropH)
+        if !pBitmap
+            return false
+        hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmap)
+        if !hBitmap
+            return false
+
+        ocrStarted := A_TickCount
+        recognizedText := OCR.FromBitmap(hBitmap, { lang: "en-US", scale: 4, grayscale: 0 }).Text
+        elapsedMs := A_TickCount - ocrStarted
+        if !RegExMatch(recognizedText, "i)(\d+)\s*/\s*(\d+)", &counter)
+            return false
+        placedCount := Integer(counter[1])
+        capacity := Integer(counter[2])
+        return true
+    } catch Error as err {
+        RuntimeLogWarn("placement_hud_count_ocr_failed", "Could not read the in-game placed tower counter",
+            "error=" err.Message)
+        return false
+    } finally {
+        if hBitmap
+            DeleteObject(hBitmap)
+        if pBitmap
+            Gdip_DisposeImage(pBitmap)
+    }
+}
+
+SavePlacementCashEvidence136(reason, towerID, slotNumber, x, y, cash, towerCost) {
+    logDir := A_AppData "\Ultimate_Macro\Logs"
+    try if !DirExist(logDir)
+        DirCreate(logDir)
+
+    safeReason := RegExReplace(reason, "[^A-Za-z0-9_-]", "_")
+    safeTowerID := RegExReplace(towerID, "[^A-Za-z0-9_-]", "_")
+    screenshotPath := logDir "\placement-cash-" safeReason "-" safeTowerID "-"
+        . FormatTime(A_Now, "yyyyMMdd-HHmmss") "-" A_TickCount ".png"
+    saved := false
+    bitmap := 0
+    try {
+        bitmap := CaptureRobloxClientBitmap()
+        if bitmap {
+            saved := Gdip_SaveBitmapToFile(bitmap, screenshotPath) = 0
+            Gdip_DisposeImage(bitmap)
+            bitmap := 0
+        }
+    } catch Error as err {
+        RuntimeLogWarn("placement_cash_screenshot_failed", "Could not save cash-placement evidence",
+            "reason=" reason "; tower=" towerID "; error=" err.Message)
+    } finally {
+        if bitmap
+            Gdip_DisposeImage(bitmap)
+    }
+
+    if !saved
+        screenshotPath := "unavailable"
+    RuntimeLogInfo("placement_cash_evidence", "Saved a placement cash-state screenshot",
+        "reason=" reason "; tower=" towerID "; slot=" slotNumber "; x=" x "; y=" y
+        . "; cash=" cash "; tower_cost=" towerCost "; screenshot=" screenshotPath)
+    return screenshotPath
+}
+
+WaitForHotbarPlacementFunds136(towerID, slotNumber, &towerCost := 0, &startingCash := 0, timeout := 120000) {
+    global RunningStrategy, Towers
+    towerCost := 0
+    startingCash := 0
+    priceText := ""
+    priceOCRMs := 0
+    if !ReadRobloxHotbarTowerCost136(slotNumber, &towerCost, &priceText, &priceOCRMs) || towerCost <= 0 {
+        RuntimeLogInfo("placement_preflight", "Hotbar price was unreadable; the game warning remains the fallback",
+            "tower=" towerID "; slot=" slotNumber "; tower_cost=unknown; cash=unknown"
+            . "; hud_placed_tower_count=unknown; strategy_tower_id_count=" Towers.Count
+            . "; price_ocr_ms=" priceOCRMs "; decision=warning_fallback")
+        return "unavailable"
+    }
+
+    cashText := ""
+    cashOCRMs := 0
+    if !ReadRobloxCashBalance136(&startingCash, &cashText, &cashOCRMs) {
+        RuntimeLogWarn("placement_preflight_cash_unreadable", "Could not read available cash before tower selection",
+            "tower=" towerID "; slot=" slotNumber "; tower_cost=" towerCost
+            . "; hud_placed_tower_count=unknown; strategy_tower_id_count=" Towers.Count
+            . "; price_ocr_ms=" priceOCRMs
+            . "; cash_ocr_ms=" cashOCRMs "; decision=warning_fallback")
+        return "unavailable"
+    }
+
+    targetCash := towerCost
+    if (startingCash >= targetCash) {
+        RuntimeLogInfo("placement_preflight", "Available cash covers the displayed hotbar price",
+            "tower=" towerID "; slot=" slotNumber "; tower_cost=" towerCost "; cash=" startingCash
+            . "; threshold=" targetCash "; strategy_tower_id_count=" Towers.Count
+            . "; price_ocr_ms=" priceOCRMs "; cash_ocr_ms=" cashOCRMs "; decision=click")
+        return "ready"
+    }
+
+    hudPlacedCount := 0
+    hudCapacity := 0
+    hudCountOCRMs := 0
+    hudCountKnown := ReadRobloxPlacedTowerCount136(&hudPlacedCount, &hudCapacity, , &hudCountOCRMs)
+    hudCountLabel := hudCountKnown ? hudPlacedCount "/" hudCapacity : "unknown"
+    screenshotPath := SavePlacementCashEvidence136("preflight-low-cash", towerID, slotNumber,
+        "pre-placement", "pre-placement", startingCash, towerCost)
+    RuntimeLogInfo("placement_preflight", "Available cash is below the displayed hotbar price; delaying input",
+        "tower=" towerID "; slot=" slotNumber "; tower_cost=" towerCost "; cash=" startingCash
+            . "; threshold=" targetCash "; hud_placed_tower_count=" hudCountLabel
+        . "; hud_count_ocr_ms=" hudCountOCRMs "; strategy_tower_id_count=" Towers.Count
+        . "; price_ocr_ms=" priceOCRMs "; cash_ocr_ms=" cashOCRMs
+        . "; decision=wait; screenshot=" screenshotPath)
+    LogToConsole("Waiting to place " towerID " until its displayed cost is affordable.")
+
+    deadline := A_TickCount + timeout
+    lastCash := startingCash
+    cashReadFailureLogged := false
+    while (A_TickCount < deadline) {
+        if (IsSet(RunningStrategy) && !RunningStrategy)
+            return "cancelled"
+
+        currentCash := 0
+        currentText := ""
+        currentOCRMs := 0
+        if ReadRobloxCashBalance136(&currentCash, &currentText, &currentOCRMs) {
+            if (currentCash >= targetCash) {
+                RuntimeLogInfo("placement_funds_available", "HUD balance reached the safe hotbar-price threshold",
+                    "tower=" towerID "; cash=" currentCash "; tower_cost=" towerCost
+                    . "; target=" targetCash "; hud_placed_tower_count=" hudCountLabel
+                    . "; strategy_tower_id_count=" Towers.Count
+                    . "; cash_ocr_ms=" currentOCRMs "; decision=select_and_place")
+                return "ready"
+            }
+            if (currentCash != lastCash) {
+                RuntimeLogInfo("placement_funds_wait_sample", "Observed available cash increase without placement input",
+                    "tower=" towerID "; cash=" currentCash "; tower_cost=" towerCost
+                    . "; target=" targetCash "; hud_placed_tower_count=" hudCountLabel
+                    . "; strategy_tower_id_count=" Towers.Count
+                    . "; cash_ocr_ms=" currentOCRMs "; decision=continue_wait")
+                lastCash := currentCash
+            }
+        } else if !cashReadFailureLogged {
+            cashReadFailureLogged := true
+            RuntimeLogWarn("placement_cash_wait_read_failed", "Cash could not be read during the pre-placement wait",
+                "tower=" towerID "; tower_cost=" towerCost "; last_cash=" lastCash
+                . "; hud_placed_tower_count=" hudCountLabel
+                . "; strategy_tower_id_count=" Towers.Count "; decision=continue_wait")
+        }
+        Sleep(500)
+    }
+
+    startingCash := lastCash
+    RuntimeLogWarn("placement_funds_wait_timeout", "Displayed tower cost was not reached before the bounded wait expired",
+        "tower=" towerID "; tower_cost=" towerCost "; last_cash=" lastCash
+        . "; target=" targetCash "; hud_placed_tower_count=" hudCountLabel
+        . "; strategy_tower_id_count=" Towers.Count
+        . "; decision=stop_without_placement_input")
+    return "timeout"
+}
+
+StopForPlacementFundsTimeout136(towerID, slotNumber, towerCost, cash, requestedX, requestedY, attemptX, attemptY) {
+    global RunningStrategy, StateFile, MainGui, canUseAbility, Towers
+    RunningStrategy := false
+    canUseAbility := true
+    try IniWrite(0, StateFile, "State", "Running")
+    try StopRuntimeTimers()
+    try ReleaseHeldInput()
+    try KillSubmacros()
+
+    screenshotPath := SavePlacementCashEvidence136("funds-timeout", towerID, slotNumber,
+        attemptX, attemptY, cash, towerCost)
+    details := "tower=" towerID "; slot=" slotNumber "; requested=" requestedX "," requestedY
+        . "; attempted=" attemptX "," attemptY "; cash=" cash "; tower_cost=" towerCost
+        . "; strategy_tower_id_count=" Towers.Count
+        . "; placement_input_sent=0; screenshot=" screenshotPath
+    RuntimeLogError("placement_cash_stopped", "Stopped before placement because funds never reached the tower cost", details)
+    alertText := "Strategy stopped before placing " towerID " because its cost remained unaffordable."
+    alertText .= "`nNo placement click was sent."
+    alertText .= "`nCash: " cash " | Tower cost: " towerCost
+    alertText .= "`nScreenshot: " screenshotPath
+    LogToConsole(alertText, true, false)
+    if IsSet(MainGui) && MainGui {
+        try MainGui.Show()
+        try ModernMsgBox("Not enough cash", alertText, "OK", "WARNING")
+    }
+    return false
+}
+
+IsPlacementInsufficientFunds(&missingCash := 0, &warningText := "", &scanElapsedMs := 0) {
+    missingCash := 0
+    warningText := ""
+    scanElapsedMs := 0
+    try {
+        scanStarted := A_TickCount
+        matched := ReadMessage(,
             "(?:not\s+enough\s+(?:cash|money|funds)"
             . "|(?:do\s+not|don't|dont)\s+have\s+enough\s+(?:cash|money|funds)"
             . "|(?:cannot|can.?t|cant)\s+afford"
+            . "|need\s+\$?\s*\d[\d,]*(?:\.\d+)?\s+more\s+to\s+place"
             . "|need\s+(?:more\s+)?(?:cash|money|funds)"
-            . "|insufficient\s+(?:cash|funds|money))")
+            . "|insufficient\s+(?:cash|funds|money))", , , &warningText, true)
+        scanElapsedMs := A_TickCount - scanStarted
+        if !matched
+            return false
+        if RegExMatch(warningText, "i)need\s+\$?\s*([\d,]+(?:\.\d+)?)\s+more\s+to\s+place", &deficit)
+            missingCash := Number(StrReplace(deficit[1], ","))
+        return true
     } catch Error {
+        scanElapsedMs := A_TickCount - (IsSet(scanStarted) ? scanStarted : A_TickCount)
         return false
     }
 }
 
-GetPlacementFailureReason() {
+GetPlacementFailureReason(&missingCash := 0) {
+    missingCash := 0
     if IsPlacementExplicitlyRejected()
         return "space"
-    if IsPlacementInsufficientFunds()
+    if IsPlacementInsufficientFunds(&missingCash)
         return "funds"
     return "unknown"
 }
 
-ResolvePlacementAmbiguity(towerID, &resV2) {
+ParsePlacementCashBalance136(ocrText) {
+    if !RegExMatch(ocrText, "i)\$\s*([\d,]+(?:\.\d+)?)\s*([kmr]?)", &cashMatch)
+        return 0
+
+    amount := Number(StrReplace(cashMatch[1], ","))
+    suffix := StrUpper(cashMatch[2])
+    if (suffix = "K" || suffix = "R")
+        amount *= 1000
+    else if (suffix = "M")
+        amount *= 1000000
+    return Round(amount)
+}
+
+ReadRobloxCashBalance136(&balance, &recognizedText := "", &elapsedMs := 0) {
+    static langCode := ""
+    balance := 0
+    recognizedText := ""
+    elapsedMs := 0
+    if !GetRobloxScreenClientRect(&clientX, &clientY, &clientW, &clientH)
+        return false
+
+    x := clientX + Round(clientW * 0.78)
+    y := clientY + Round(clientH * 0.08)
+    width := Round(clientW * 0.21)
+    height := Round(clientH * 0.12)
+    if (width <= 0 || height <= 0)
+        return false
+
+    pBitmap := 0, hBitmap := 0
+    try {
+        pBitmap := Gdip_BitmapFromScreen(x "|" y "|" width "|" height)
+        if !pBitmap
+            return false
+        hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmap)
+        if !hBitmap
+            return false
+
+        if (langCode = "") {
+            langCode := "en-US"
+            for availableLang in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
+                if (availableLang != "" && SubStr(availableLang, 1, 2) = "en") {
+                    langCode := availableLang
+                    break
+                }
+            }
+        }
+        ocrStarted := A_TickCount
+        recognizedText := OCR.FromBitmap(hBitmap, { lang: langCode, scale: 3, grayscale: 0 }).Text
+        elapsedMs := A_TickCount - ocrStarted
+        balance := ParsePlacementCashBalance136(recognizedText)
+        return RegExMatch(recognizedText, "i)\$\s*[\d,]+(?:\.\d+)?\s*[kmr]?") > 0
+    } catch Error {
+        balance := 0
+        elapsedMs := A_TickCount - (IsSet(ocrStarted) ? ocrStarted : A_TickCount)
+        return false
+    } finally {
+        if hBitmap
+            DeleteObject(hBitmap)
+        if pBitmap
+            Gdip_DisposeImage(pBitmap)
+    }
+}
+
+WaitForPlacementFunds136(towerID, missingCash, &startingCash := 0, timeout := 120000) {
     global RunningStrategy
+    startingCash := 0
+    if (missingCash <= 0) {
+        RuntimeLogWarn("placement_cash_deficit_missing", "The TDS cash warning did not include a readable deficit",
+            "tower=" towerID)
+        return false
+    }
+    if !ReadRobloxCashBalance136(&startingCash) {
+        RuntimeLogWarn("placement_cash_balance_unreadable", "Could not read the HUD balance after an insufficient-cash warning",
+            "tower=" towerID "; deficit=" missingCash)
+        return false
+    }
+
+    targetCash := startingCash + missingCash + 50
+    RuntimeLogInfo("placement_funds_wait_started", "Waiting for the HUD balance before retrying a cash-blocked placement",
+        "tower=" towerID "; cash=" startingCash "; deficit=" missingCash "; target=" targetCash)
+    deadline := A_TickCount + timeout
+    while (A_TickCount < deadline) {
+        if (IsSet(RunningStrategy) && !RunningStrategy)
+            return false
+        if ReadRobloxCashBalance136(&currentCash) && currentCash >= targetCash {
+            RuntimeLogInfo("placement_funds_available", "HUD balance reached the safe placement threshold",
+                "tower=" towerID "; cash=" currentCash "; target=" targetCash)
+            return true
+        }
+        Sleep(500)
+    }
+
+    RuntimeLogWarn("placement_funds_wait_timeout", "HUD balance did not reach the required cash threshold",
+        "tower=" towerID "; target=" targetCash)
+    return false
+}
+
+HandlePlacementFunds136(towerID, missingCash, originalX, originalY, currentX, currentY, attempts) {
+    global CancelPlacementKey
+    ClearPlacementPending136()
+    LogToConsole("Tower " towerID " is waiting for enough cash; keeping the recorded position.")
+    RuntimeLogInfo("placement_waiting_for_funds", "Placement was blocked by insufficient funds; waiting without re-clicking",
+        "tower=" towerID "; x=" currentX "; y=" currentY "; deficit=" missingCash)
+    SendEvent("{" CancelPlacementKey "}")
+    if !WaitForPlacementFunds136(towerID, missingCash, &startingCash) {
+        StopForUncertainPlacement136(towerID, originalX, originalY, currentX, currentY, attempts,
+            "cash_wait_failed; starting_cash=" startingCash "; deficit=" missingCash)
+        return false
+    }
+    return true
+}
+
+ResolvePlacementAmbiguity(towerID, &resV2, &missingCash := 0) {
+    global RunningStrategy
+    missingCash := 0
 
     passiveDeadline := A_TickCount + 2500
     while (A_TickCount < passiveDeadline) {
@@ -10471,13 +12207,13 @@ ResolvePlacementAmbiguity(towerID, &resV2) {
         if waitForTowerUI(&resV2, , 300)
             return "success"
 
-        failureReason := GetPlacementFailureReason()
+        failureReason := GetPlacementFailureReason(&missingCash)
         if (failureReason != "unknown")
             return failureReason
         Sleep(150)
     }
 
-    failureReason := GetPlacementFailureReason()
+    failureReason := GetPlacementFailureReason(&missingCash)
     if (failureReason != "unknown")
         return failureReason
 
@@ -10595,7 +12331,7 @@ SellTowerForget(towerID) {
 
 UpgradeTower(towerID, skipOpen := false, totalUpgrades := 1, path := 0, pathLevel := 0) {
     global Towers, unfocusX, unfocusY, LastOpenedTowerID, needtocheckTowerUI, UpgradeDelay
-    global PotatoMode, Recording, RecordedSteps, Commander, canUseAbility, canBeUpgraded, RunningStrategy
+    global PotatoMode, Recording, RecordedSteps, Commander, canUseAbility, canBeUpgraded, RunningStrategy, StateFile
 
     static resV2 := 0
     static resV1 := 0
@@ -10640,14 +12376,6 @@ UpgradeTower(towerID, skipOpen := false, totalUpgrades := 1, path := 0, pathLeve
 
         openedSuccessfully := false
 
-        if (A_TickCount - upgradeDeadline > 300000) {
-            LogToConsole("Tower " towerID " could not be upgraded within 5 minutes. Skipping step.", true)
-            RuntimeLogWarn("upgrade_timeout", "Upgrade step abandoned",
-                "tower=" towerID "; done=" upgradesDone "/" totalUpgrades)
-            canUseAbility := true
-            return false
-        }
-
         if (PotatoMode) {
             if (A_TickCount - upgTime > 600) {
                 needtocheckTowerUI := true
@@ -10677,10 +12405,12 @@ UpgradeTower(towerID, skipOpen := false, totalUpgrades := 1, path := 0, pathLeve
                     Sleep(350)
                     canUseAbility := true
                     if (menuRecoveryCount >= 3) {
-                        RuntimeLogWarn("upgrade_menu_unavailable", "Upgrade step skipped without reloading the macro",
+                        RuntimeLogWarn("upgrade_menu_unavailable", "Waiting for the tower panel instead of skipping the upgrade step",
                             "tower=" towerID "; done=" upgradesDone "/" totalUpgrades)
-                        LogToConsole("Tower " towerID " menu stayed unavailable; skipping this upgrade step without restarting the run.", true)
-                        return false
+                        LogToConsole("Still waiting for " towerID " upgrade panel; the strategy is paused on this tower.", true)
+                        LastOpenedTowerID := ""
+                        MacroPhase("waiting_for_upgrade_panel", 900000)
+                        Sleep(1000)
                     }
                     continue
                 }
@@ -10741,66 +12471,151 @@ UpgradeTower(towerID, skipOpen := false, totalUpgrades := 1, path := 0, pathLeve
         WA := region[3]
         HA := region[4]
 
+        if Towers[towerID].HasProp("pendingUpgradeSell") {
+            canUseAbility := false
+            fullyUpgraded := AdvancedImageSearch("Resources/fully_upgraded.png", XA, YA, WA, HA)
+            if (fullyUpgraded.score >= 0.69) {
+                Sleep(80)
+                fullyUpgraded := AdvancedImageSearch("Resources/fully_upgraded.png", XA, YA, WA, HA)
+                if (fullyUpgraded.score >= 0.69) {
+                    Towers[towerID].DeleteProp("pendingUpgradeSell")
+                    if Towers[towerID].HasProp("pendingUpgradeTick")
+                        Towers[towerID].DeleteProp("pendingUpgradeTick")
+                    if Towers[towerID].HasProp("pendingUpgradeNoticeTick")
+                        Towers[towerID].DeleteProp("pendingUpgradeNoticeTick")
+                    if (RegExMatch(towerID, "i)^Commander\d*$"))
+                        Commander := true
+                    RuntimeLogInfo("upgrade_reconciled_fully_upgraded",
+                        "Selected tower consistently shows Fully Upgraded; strategy can continue",
+                        "tower=" towerID "; evidence=stable_fully_upgraded_image")
+                    LogToConsole(towerID " is fully upgraded. Continuing the strategy.")
+                    canUseAbility := true
+                    return true
+                }
+            }
+
+            currentSell := ReadTowerSellValue136(resV2, resV1)
+            Sleep(60)
+            stableSell := ReadTowerSellValue136(resV2, resV1)
+            priorSell := Towers[towerID].pendingUpgradeSell
+            if UpgradeSellValueConfirmed136(priorSell, currentSell, stableSell) {
+                Towers[towerID].level++
+                if Towers[towerID].level >= 2 && RegExMatch(towerID, "i)^Commander\d*$")
+                    Commander := true
+                nextLevel := Towers[towerID].level + 1
+                RuntimeLogInfo("upgrade_reconciled", "Previously uncertain input is now reflected in the sell value",
+                    "tower=" towerID "; level=" Towers[towerID].level "; evidence=sell_value_increased")
+                UpdateTowerIndicator(towerID)
+                Towers[towerID].DeleteProp("pendingUpgradeSell")
+                if Towers[towerID].HasProp("pendingUpgradeNoticeTick")
+                    Towers[towerID].DeleteProp("pendingUpgradeNoticeTick")
+                if Towers[towerID].HasProp("pendingUpgradeTick")
+                    Towers[towerID].DeleteProp("pendingUpgradeTick")
+                upgradesDone++
+                canUseAbility := true
+                if (upgradesDone >= totalUpgrades)
+                    return true
+            } else if currentSell != "" && currentSell = priorSell && stableSell = priorSell {
+                ; Give a delayed server response time to arrive before any retry.
+                if Towers[towerID].HasProp("pendingUpgradeTick")
+                    && A_TickCount - Towers[towerID].pendingUpgradeTick < 2500 {
+                    canUseAbility := true
+                    Sleep(250)
+                    continue
+                }
+                Towers[towerID].DeleteProp("pendingUpgradeSell")
+                if Towers[towerID].HasProp("pendingUpgradeTick")
+                    Towers[towerID].DeleteProp("pendingUpgradeTick")
+                if Towers[towerID].HasProp("pendingUpgradeNoticeTick")
+                    Towers[towerID].DeleteProp("pendingUpgradeNoticeTick")
+                canUseAbility := true
+            } else {
+                if (A_TickCount >= nextWaitLog) {
+                    RuntimeLogWarn("upgrade_pending", "Previous upgrade is still unresolved; waiting without sending another input",
+                        "tower=" towerID "; next_level=" nextLevel)
+                    LogToConsole("Still waiting for " towerID " upgrade confirmation; the strategy is paused on this tower.", true, false)
+                    MacroPhase("waiting_for_upgrade_confirmation", 900000)
+                    nextWaitLog := A_TickCount + 15000
+                }
+                canUseAbility := true
+                Sleep(400)
+                continue
+            }
+        }
+
         X2 := XA + WA
         Y2 := YA + HA
 
         isGreen := HasStableUpgradeAffordance(XA, YA, X2, Y2)
         if (isGreen && canBeUpgraded) {
-            beforeEvidence := CaptureUpgradeEvidence(XA, YA, WA, HA)
             canUseAbility := false
+            beforeSell := ReadTowerSellValue136(resV2, resV1)
+            if beforeSell = "" {
+                if (A_TickCount >= nextWaitLog) {
+                    RuntimeLogWarn("upgrade_evidence_unavailable", "Waiting until the selected tower's sell value is readable",
+                        "tower=" towerID "; next_level=" nextLevel)
+                    LogToConsole("Waiting to verify " towerID " upgrade; no repeated upgrade sent.", true)
+                    MacroPhase("waiting_for_upgrade_evidence", 900000)
+                    nextWaitLog := A_TickCount + 15000
+                }
+                canUseAbility := true
+                Sleep(400)
+                continue
+            }
+            canUseAbility := false
+            upgradeInputTick := A_TickCount
             if (UseHForUpgrade) {
                 if IsPathSpecificUpgrade(towerID, nextLevel, path, effectivePathLevel) {
-                    if (path = 1) {
+                    if (path = 1)
                         SendEvent("{" UpgradeTowerGKey "}")
-                    } else if (path = 2) {
+                    else if (path = 2)
                         SendEvent("{" UpgradeTowerGBKey "}")
-                    }
                 } else {
                     SendEvent("{" UpgradeTowerGKey "}")
                 }
             } else {
                 Click(UpgradeX, UpgradeY)
             }
-
-            settleDelay := Max(250, IsNumber(UpgradeDelay) ? Integer(UpgradeDelay) : 250)
-            Sleep(settleDelay)
+            ; Observe the existing input: NEVER click the same uncertain upgrade twice.
+            Sleep(Max(60, IsNumber(UpgradeDelay) ? Integer(UpgradeDelay) : 200))
             needtocheckTowerUI := true
-
-            afterEvidence := CaptureUpgradeEvidence(XA, YA, WA, HA)
             verifiedResV2 := ""
             verifiedResV1 := ""
-            uiVerified := waitForTowerUI(&verifiedResV2, &verifiedResV1, 1000)
-            if (!uiVerified || beforeEvidence = "" || afterEvidence = "" || beforeEvidence = afterEvidence) {
-                Sleep(300)
-                lateEvidence := CaptureUpgradeEvidence(XA, YA, WA, HA)
-                if (lateEvidence != "" && beforeEvidence != "" && lateEvidence != beforeEvidence) {
-                    afterEvidence := lateEvidence
-                } else if (upgradeActionAttempts < 2 && HasStableUpgradeAffordance(XA, YA, X2, Y2)) {
-                    upgradeActionAttempts++
-                    RuntimeLogWarn("upgrade_retry", "Upgrade was not confirmed; retrying within bounded budget",
-                        "tower=" towerID "; next_level=" nextLevel "; attempt=" upgradeActionAttempts)
-                    canUseAbility := true
-                    needtocheckTowerUI := true
-                    Sleep(250)
-                    continue
-                } else {
-                    LogToConsole("Tower " towerID " upgrade was not confirmed; refusing to advance internal state.", true)
-                    RuntimeLogWarn("upgrade_ambiguous", "Upgrade input did not produce sufficient post-action evidence after bounded retries",
-                        "tower=" towerID "; next_level=" nextLevel)
-                    canUseAbility := true
-                    return false
+            uiVerified := waitForTowerUI(&verifiedResV2, &verifiedResV1, 1300)
+            evidenceAccepted := false
+            if uiVerified {
+                Loop 3 {
+                    afterSell := ReadTowerSellValue136(verifiedResV2, verifiedResV1)
+                    Sleep(60)
+                    stableAfterSell := ReadTowerSellValue136(verifiedResV2, verifiedResV1)
+                    if UpgradeSellValueConfirmed136(beforeSell, afterSell, stableAfterSell) {
+                        evidenceAccepted := true
+                        break
+                    }
+                    Sleep(60)
                 }
             }
-
-            if (afterEvidence = "" || beforeEvidence = afterEvidence) {
-                LogToConsole("Tower " towerID " upgrade was not confirmed; refusing to advance internal state.", true)
-                RuntimeLogWarn("upgrade_ambiguous", "Upgrade evidence remained unchanged after passive verification",
-                    "tower=" towerID "; next_level=" nextLevel)
+            if !evidenceAccepted {
+                Towers[towerID].pendingUpgradeSell := beforeSell
+                Towers[towerID].pendingUpgradeTick := upgradeInputTick
+                if (!Towers[towerID].HasProp("pendingUpgradeNoticeTick")
+                    || A_TickCount - Towers[towerID].pendingUpgradeNoticeTick >= 15000) {
+                    Towers[towerID].pendingUpgradeNoticeTick := A_TickCount
+                    RuntimeLogWarn("upgrade_unconfirmed", "Upgrade input is awaiting evidence; no duplicate attempt was sent",
+                        "tower=" towerID "; next_level=" nextLevel "; tower_ui=" (uiVerified ? "seen" : "missing"))
+                    try AutoLogsEvent(StateFile, "upgrade_unconfirmed", "tower=" towerID "; level=" nextLevel "; ui=" (uiVerified ? "seen" : "missing"))
+                    LogToConsole("Waiting for " towerID " upgrade to register; the strategy is paused here.", true)
+                    MacroPhase("waiting_for_upgrade_confirmation", 900000)
+                    nextWaitLog := A_TickCount + 15000
+                }
                 canUseAbility := true
-                return false
+                Sleep(250)
+                continue
             }
 
             upgradeActionAttempts := 0
+            RuntimeLogInfo("upgrade_confirmed", "Sell value increased and remained stable after one input",
+                "tower=" towerID "; next_level=" nextLevel "; evidence=sell_value_increased")
             Towers[towerID].level += 1
             if Towers[towerID].HasProp("pendingPlacement")
                 Towers[towerID].pendingPlacement := false
@@ -10842,6 +12657,7 @@ UpgradeTower(towerID, skipOpen := false, totalUpgrades := 1, path := 0, pathLeve
             RuntimeLogInfo("upgrade_waiting", "Waiting for upgrade availability",
                 "tower=" towerID "; waited_s=" waitedSeconds "; done=" upgradesDone "/" totalUpgrades)
             LogToConsole("Waiting to upgrade " towerID " (cash or upgrade button unavailable, " waitedSeconds "s)...")
+                MacroPhase("waiting_for_upgrade_availability", 900000)
             nextWaitLog := A_TickCount + 15000
         }
 
@@ -10869,18 +12685,60 @@ HasStableUpgradeAffordance(x1, y1, x2, y2) {
     return UpgradeButtonIsReady(x1, y1, x2, y2)
 }
 
-CaptureUpgradeEvidence(x, y, w, h) {
-    if (w <= 0 || h <= 0)
-        return ""
+TowerSearchName136(tower) {
+    name := Trim(RegExReplace(tower, "i)\b(Golden|G\.|G|Regular|R\.|R)\b\s*|\."))
+    ; Correct the reported search alias without renaming recorded tower IDs.
+    return StrLower(name) = "shotguuner" ? "Shotgunner" : name
+}
 
-    evidence := ""
-    for _, point in [[0.12, 0.20], [0.50, 0.20], [0.88, 0.20], [0.12, 0.50], [0.50, 0.50],
-        [0.88, 0.50], [0.12, 0.80], [0.50, 0.80], [0.88, 0.80]] {
-        try evidence .= PixelGetColor(x + Round(w * point[1]), y + Round(h * point[2]), "RGB") "|"
-        catch Error
-            return ""
+ReadTowerSellValue136(resV2, resV1) {
+    if !GetRobloxScreenClientRect(&screenX, &screenY, &w, &h)
+        return ""
+    if IsObject(resV2) && resV2.HasProp("score") && resV2.score > .55 {
+        x := resV2.x - ScaleX(100), y := resV2.y - ScaleY(30)
+        width := ScaleX(300), height := ScaleY(60)
+    } else if IsObject(resV1) && resV1.HasProp("score") && resV1.score > .68 {
+        x := resV1.x - ScaleX(344), y := resV1.y + ScaleY(343)
+        width := ScaleX(300), height := ScaleY(350)
+    } else {
+        return ""
     }
-    return evidence
+    x := Max(0, x), y := Max(0, y)
+    width := Min(width, w - x), height := Min(height, h - y)
+    if width <= 0 || height <= 0
+        return ""
+    static langCode := ""
+    if langCode = "" {
+        langCode := "en-US"
+        for lang in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
+            if SubStr(lang, 1, 2) = "en" {
+                langCode := lang
+                break
+            }
+        }
+    }
+    try {
+        result := ReadGameText136(screenX + x, screenY + y, width, height,
+            {lang: langCode, scale: 2, grayscale: 1})
+        return ParseTowerSellValue136(result.Text)
+    } catch Error {
+        return ""
+    }
+}
+
+ParseTowerSellValue136(text) {
+    if !RegExMatch(text, "i)\bSell\s*:?\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([KMB]?)\b", &m)
+        return ""
+    amount := Number(StrReplace(m[1], ",", ""))
+    suffix := StrUpper(m[2])
+    multiplier := suffix = "K" ? 1000 : (suffix = "M" ? 1000000 : (suffix = "B" ? 1000000000 : 1))
+    return Round(amount * multiplier)
+}
+
+UpgradeSellValueConfirmed136(before, after, stableAfter) {
+    return before != "" && after != "" && stableAfter != ""
+        && IsNumber(before) && IsNumber(after) && IsNumber(stableAfter)
+        && after > before && after = stableAfter
 }
 
 isDisconnected() {
@@ -10926,9 +12784,9 @@ TryReconnect() {
             return false
         attempts++
         if (attempts > maxReconnectAttempts) {
-            RuntimeLogError("reconnect_retry_exhausted", "Reconnect stopped after the bounded retry budget",
+            RuntimeLogWarn("reconnect_retry_exhausted", "Reconnect attempt group exhausted; requesting a fresh recovery",
                 "attempts=" maxReconnectAttempts)
-            StopStrategy()
+            RecoverRuntimeFailure("reconnect_retry_exhausted")
             return false
         }
         LogToConsole("Reconnecting... Attempt " attempts ".", true, false)
@@ -10974,10 +12832,10 @@ CheckPopups(*) {
 }
 
 UseAbilities(*) {
-    global canUseAbility, canBeUpgraded, needtocheckTowerUI
+    global canUseAbility, canBeUpgraded, needtocheckTowerUI, ShardPickupBusy136, RunningStrategy
     static callbackActive := false
 
-    if (callbackActive || !canUseAbility)
+    if (callbackActive || !canUseAbility || ShardPickupBusy136 || !RunningStrategy)
         return
 
     callbackActive := true
@@ -10991,6 +12849,15 @@ UseAbilities(*) {
         canBeUpgraded := true
         needtocheckTowerUI := true
     }
+}
+
+FindReadyDJ136() {
+    global Towers
+    for id, tower in Towers {
+        if RegExMatch(id, "i)^DJ\d*$") && tower.level >= 3
+            return id
+    }
+    return ""
 }
 
 UseAbilitiesPass() {
@@ -11035,7 +12902,7 @@ UseAbilitiesPass() {
         }
     }
 
-    if (autoChain = "ON" && Commander && (A_TickCount - LastChainTime > chainInterval * 1000 / multiplier)) {
+    if ((autoChain = "ON" || AbilitySpam = "ON") && Commander && (A_TickCount - LastChainTime > chainInterval * 1000 / multiplier)) {
         canUseAbility := false
         canBeUpgraded := false
         if (LastOpenedTowerID != "") {
@@ -11044,7 +12911,8 @@ UseAbilitiesPass() {
         }
         LastChainTime := A_TickCount
         SendEvent("{" ChainKey "}")
-        LogToConsole("Activated Call of Arms")
+        RuntimeLogInfo("ability_key_sent", "Commander ability hotkey sent; in-game activation not confirmed", "ability=CallOfArms")
+        LogToConsole("Call of Arms key sent (game activation not verified)")
         canUseAbility := true
         if (LastOpenedTowerID != "" && Towers.Has(LastOpenedTowerID)) {
             Click(Towers[LastOpenedTowerID].x, Towers[LastOpenedTowerID].y)
@@ -11054,7 +12922,7 @@ UseAbilitiesPass() {
         needtocheckTowerUI := true
     }
 
-    if (autoCaravan = "ON" && (A_TickCount - LastCaravanTime > caravanInterval * 1000 / multiplier)) {
+    if ((autoCaravan = "ON" || AbilitySpam = "ON") && (A_TickCount - LastCaravanTime > caravanInterval * 1000 / multiplier)) {
 
         foundCommander := false
         for name, towerID in Towers {
@@ -11075,7 +12943,8 @@ UseAbilitiesPass() {
             }
             LastCaravanTime := A_TickCount
             SendEvent("{" CaravanKey "}")
-            LogToConsole("Activated Support Caravan")
+            RuntimeLogInfo("ability_key_sent", "Support Caravan hotkey sent; in-game activation not confirmed", "ability=Caravan")
+            LogToConsole("Support Caravan key sent (game activation not verified)")
             if (LastOpenedTowerID != "" && Towers.Has(LastOpenedTowerID)) {
                 Click(Towers[LastOpenedTowerID].x, Towers[LastOpenedTowerID].y)
                 Sleep 400
@@ -11086,13 +12955,14 @@ UseAbilitiesPass() {
         }
     }
 
-    if (autoDropTheBeat = "ON" && Towers.Has("DJ") && Towers["DJ"].level >= 3 && (A_TickCount - LastDropTime > 28000 /
-        multiplier)) {
+    djTower := FindReadyDJ136()
+    if ((autoDropTheBeat = "ON" || AbilitySpam = "ON") && djTower != ""
+        && (A_TickCount - LastDropTime > 28000 / multiplier)) {
 
         canBeUpgraded := false
 
         SendEvent("{" CancelPlacementKey "}")
-        if (LastOpenedTowerID != "DJ" && LastOpenedTowerID != "") {
+        if (LastOpenedTowerID != djTower && LastOpenedTowerID != "") {
             Click(ScaleX(unfocusX), ScaleY(unfocusY))
             Sleep(100)
         }
@@ -11122,7 +12992,7 @@ UseAbilitiesPass() {
             }
         }
 
-        if (LastOpenedTowerID != "" && LastOpenedTowerID != "DJ" && Towers.Has(LastOpenedTowerID)) {
+        if (LastOpenedTowerID != "" && LastOpenedTowerID != djTower && Towers.Has(LastOpenedTowerID)) {
             Click(Towers[LastOpenedTowerID].x, Towers[LastOpenedTowerID].y)
             Sleep 250
         }
@@ -11370,7 +13240,9 @@ DeleteAllIndicators() {
     SetWinDelay(-1)
     for id, t in Towers {
         if (t.HasProp("hwnd") && t.hwnd) {
-            WinClose("ahk_id " t.hwnd)
+            try GuiFromHwnd(t.hwnd).Destroy()
+            catch Error
+                try WinClose("ahk_id " t.hwnd)
             t.hwnd := ""
         }
     }
@@ -11479,6 +13351,10 @@ ShowDebugConsole() {
 
     og.Show("x" OverlayX " y" OverlayY " w" OverlayWidth " h" OverlayHeight " NA")
 
+    ; Windows 10 2004+ excludes our own overlay from screen captures.
+    ; OCR additionally hides it for the duration of its capture on older systems.
+    try DllCall("user32\SetWindowDisplayAffinity", "Ptr", OverlayHWND, "UInt", 0x11)
+
     WinSetTransColor("0x000000", "ahk_id " OverlayHWND)
 
 
@@ -11527,6 +13403,23 @@ OcrMatchTargetsGameUI(match, label) {
     }
 
     return true
+}
+
+ReadGameText136(x, y, w, h, options) {
+    global OverlayHWND
+    overlay := IsSet(OverlayHWND) ? OverlayHWND : 0
+    wasVisible := overlay && WinExist("ahk_id " overlay)
+        && (WinGetStyle("ahk_id " overlay) & 0x10000000)
+    try {
+        if wasVisible {
+            WinHide("ahk_id " overlay)
+            try DllCall("dwmapi\DwmFlush")
+        }
+        return OCR.FromRect(x, y, w, h, options)
+    } finally {
+        if wasVisible && DllCall("user32\IsWindow", "Ptr", overlay, "Int")
+            DllCall("user32\ShowWindow", "Ptr", overlay, "Int", 4)
+    }
 }
 
 HideDebugConsole() {
@@ -11692,173 +13585,158 @@ FormatRuntime(StartTicks) {
     return (h > 0) ? Format("{:d}:{:02d}:{:02d}", h, m, s) : Format("{:d}:{:02d}", m, s)
 }
 
-claimPlaytimeRewards() {
-    global CollectPlaytimeRewards, NextCheckInterval
+FindPlaytimeRewardsMenu136(w, h) {
+    return AdvancedImageSearch("Resources/playtime_close.png", Round(w * .2), Round(h * .08),
+        Round(w * .75), Round(h * .37), .4, 2, .025)
+}
 
-    if (CollectPlaytimeRewards != "1" && CollectPlaytimeRewards != 1) {
-        return
+FindPlaytimeClaimButtons136(w, h) {
+    pending := [[Round(w * .18), Round(h * .2), Round(w * .65), Round(h * .67)]]
+    buttons := []
+    scans := 0
+    while pending.Length && scans < 80 && buttons.Length < 32 {
+        region := pending.RemoveAt(1)
+        if region[3] < 8 || region[4] < 8
+            continue
+        scans++
+        hit := AdvancedImageSearch("Resources/playtime_claim.png", region[1], region[2], region[3], region[4], .4, 2, .025)
+        if hit.status != "success" || hit.score < .85
+            continue
+        bw := hit.HasProp("w") ? hit.w : Round(93 * h / 1009)
+        bh := hit.HasProp("h") ? hit.h : Round(28 * h / 1009)
+        if !hit.HasProp("w") {
+            hit.x += bw // 2
+            hit.y += bh // 2
+        }
+        left := Max(region[1], Floor(hit.x - bw / 2))
+        top := Max(region[2], Floor(hit.y - bh / 2))
+        right := Min(region[1] + region[3], Ceil(hit.x + bw / 2))
+        bottom := Min(region[2] + region[4], Ceil(hit.y + bh / 2))
+        if right <= left || bottom <= top
+            continue
+        buttons.Push(hit)
+        ; Partition around the detected button so the same CLAIM is not counted twice.
+        pending.Push([region[1], region[2], left - region[1], region[4]])
+        pending.Push([right, region[2], region[1] + region[3] - right, region[4]])
+        pending.Push([left, region[2], right - left, top - region[2]])
+        pending.Push([left, bottom, right - left, region[2] + region[4] - bottom])
     }
+    ordered := []
+    for button in buttons {
+        index := ordered.Length + 1
+        for i, previous in ordered {
+            if button.y < previous.y - Round(h * .012)
+                || (Abs(button.y - previous.y) <= Round(h * .012) && button.x < previous.x) {
+                index := i
+                break
+            }
+        }
+        ordered.InsertAt(index, button)
+    }
+    return ordered
+}
+
+WaitForPlaytimeRewardsReturn136(w, h) {
+    global RunningStrategy
     Sleep(2000)
-
-    getRobloxPos(&pX, &pY, &w, &h)
-    popupColor := PixelGetColor(w - 268, pY + 5, "RGB")
-    r1 := (popupColor >> 16) & 0xFF, g1 := (popupColor >> 8) & 0xFF, b1 := popupColor & 0xFF
-    r2 := 0xEE, g2 := 0x18, b2 := 0x18
-    diff := Sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
-
-    if (diff < 3) {
-        LogToConsole("Claiming playtime rewards..")
-        Click(w - 290, pY + 32)
-
-        Sleep(1000)
-
-        openedMenu := false
-        loop 15 {
-            getRobloxPos(&pX, &pY, &w, &h)
-            X1 := Round(w * 0.2)
-            Y1 := Round(h * 0.15)
-            W := Round(w * 1) - X1
-            H := Round(h * 0.4) - Y1
-            resclose := AdvancedImageSearch("Resources\close_freerewards.png", X1, Y1, W, H)
-
-            if (resclose.status = "success" && resclose.score >= 0.86) {
-                openedMenu := true
-                break
-            }
-            Sleep(300)
-        }
-
-        if (!openedMenu) {
-            getRobloxPos(&pX, &pY, &w, &h)
-            MouseMove(w - 290, pY + 32, A_DefaultMouseSpeed + 1)
-            Sleep(50)
-            MouseClick()
-
-            openedMenu := false
-            loop 25 {
-                getRobloxPos(&pX, &pY, &w, &h)
-                X1 := Round(w * 0.2)
-                Y1 := Round(h * 0.15)
-                W := Round(w * 1) - X1
-                H := Round(h * 0.4) - Y1
-                resclose := AdvancedImageSearch("Resources\close_freerewards.png", X1, Y1, W, H)
-
-                if (resclose.status = "success" && resclose.score >= 0.86) {
-                    openedMenu := true
-                    break
-                }
-
-                res := AdvancedImageSearch("Resources/Claim.png", Round(w * 0.25), Round(h * 0.4), Round(w * 0.5),
-                    Round(h * 0.5), 0.5, 2)
-                if (res.status = "success" && res.score >= 0.65) {
-                    Click(res.x, res.y)
-                }
-
-                Sleep(300)
-            }
-
-            if (!openedMenu) {
-                LogToConsole("Failed to claim rewards!", true, false)
-                return
-            }
-        }
-
-        loop {
-            getRobloxPos(&pX, &pY, &w, &h)
-
-            loop 10 {
-                if (PixelSearch(&cx, &cy, Round(w * 0.25), Round(h * 0.2), Round(w * 0.55), Round(h * 0.76), 0x64F711,
-                    5))
-                    break
-                else
-                    Sleep(100)
-            }
-
-            if (!PixelSearch(&cx, &cy, Round(w * 0.25), Round(h * 0.2), Round(w * 0.55), Round(h * 0.76), 0x64F711, 5)) {
-                break
-            }
-
-            Click(cx, cy)
-            Sleep(500)
-
-            loop {
-                resConfirm := AdvancedImageSearch("Resources/claimreward.png", Round(w * 0.25), Round(h * 0.5), Round(w *
-                    0.5), Round(h * 0.5), , 1.5)
-
-                if (resConfirm.status == "success" && resConfirm.score > 0.65) {
-                    Click(resConfirm.x, resConfirm.y)
-                    MouseMove(ScaleX(unfocusX), ScaleY(unfocusY))
-                    Sleep(800)
-                } else {
-                    Sleep(300)
-                    resConfirm := AdvancedImageSearch("Resources/claimreward.png", Round(w * 0.25), Round(h * 0.5),
-                        Round(w * 0.5), Round(h * 0.5), , 1.5)
-                    if (resConfirm.status == "success" && resConfirm.score > 0.65) {
-                        continue
-                    }
-                    break
-                }
-            }
-        }
-
-        Sleep(800)
-
-        if !GetRobloxScreenClientRect(&rewClientX, &rewClientY, &w, &h)
-            return
-
-        x1 := rewClientX + Round(w * 0.39)
-        y1 := rewClientY + Round(h * 0.36)
-        x2 := Round(w * 0.22)
-        y2 := Round(h * 0.4)
-
-        langCode := "en-US"
-        for availableLang in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
-            if (availableLang != "" && SubStr(availableLang, 1, 2) = "en") {
-                langCode := availableLang
-                break
-            }
-        }
-
-        textOnScreen := ""
-        try textOnScreen := OCR.FromRect(x1, y1, x2, y2, { lang: langCode, invertcolors: 1, scale: 2 }).Text
-        catch Error as rewErr
-            RuntimeLogWarn("playtime_ocr_failed", "Reward counter OCR failed", "error=" rewErr.Message)
-
-        claimedCount := 0
-        StrReplace(textOnScreen, "CLAIMED", , , &claimedCount)
-
-        if (claimedCount != 0) {
-            LogToConsole("Claimed free rewards (" . claimedCount . "/6)")
-        }
-
-        if (claimedCount >= 6) {
-            LogToConsole("All rewards collected! Next check in 24 hours.")
-            NextCheckInterval := 86400000
-        } else {
-            LogToConsole("Not all rewards collected. Next check in 2 hours.")
-            NextCheckInterval := 7200000
-        }
-
-        X1 := Round(w * 0.2)
-        Y1 := Round(h * 0.15)
-        W := Round(w * 1) - X1
-        H := Round(h * 0.4) - Y1
-        resclose := AdvancedImageSearch("Resources\close_freerewards.png", X1, Y1, W, H)
-
-        if (resclose.status = "success" && resclose.score >= 0.86) {
-            Click(resclose.x, resclose.y)
-        } else {
-            Click(ScaleX(1126), ScaleY(307))
-        }
+    if !ClickPlay136(Round(w * .9), Round(h * .9))
+        return false
+    Loop 11 {
+        if IsSet(RunningStrategy) && !RunningStrategy
+            return false
+        menu := FindPlaytimeRewardsMenu136(w, h)
+        if menu.status = "success" && menu.score >= .85
+            return true
+        if A_Index = 11
+            break
+        Sleep(3000)
+        if !ClickPlay136(Round(w * .9), Round(h * .9))
+            return false
     }
-    UpdateDailyRewardTime()
+    return false
+}
+
+claimPlaytimeRewards() {
+    global CollectPlaytimeRewards, NextCheckInterval, StateFile, RunningStrategy, PlaytimeRewardsRecover136
+    PlaytimeRewardsRecover136 := false
+    if CollectPlaytimeRewards != 1
+        return false
+    if !ActivateRoblox() || !GetRobloxScreenClientRect(&sx, &sy, &w, &h) || w < 600 || h < 350
+        return false
+    opened := false, claimed := 0
+    try {
+        available := AdvancedImageSearch("Resources/playtime_available.png", Round(w * .72), 0,
+            Round(w * .23), Round(h * .16), .4, 2, .025)
+        if available.status != "success" || available.score < .9
+            return false
+        Loop 4 {
+            if IsSet(RunningStrategy) && !RunningStrategy
+                return false
+            menu := FindPlaytimeRewardsMenu136(w, h)
+            if menu.status = "success" && menu.score >= .85 {
+                opened := true
+                break
+            }
+            if A_Index = 4
+                break
+            if !ClickPlay136(available.x, available.y)
+                return false
+            Sleep(550)
+        }
+        if !opened {
+            PlaytimeRewardsRecover136 := true
+            RuntimeLogWarn("playtime_menu_unavailable", "Reward indicator was found but the rewards menu did not open")
+            return false
+        }
+        buttons := FindPlaytimeClaimButtons136(w, h)
+        RuntimeLogInfo("playtime_claims_detected", "Counted available CLAIM buttons", "count=" buttons.Length)
+        Loop 32 {
+            if !buttons.Length || (IsSet(RunningStrategy) && !RunningStrategy)
+                break
+            button := buttons[1]
+            if !ClickPlay136(button.x, button.y)
+                break
+            if !WaitForPlaytimeRewardsReturn136(w, h) {
+                PlaytimeRewardsRecover136 := true
+                RuntimeLogWarn("playtime_return_timeout", "Reward popup did not return to the menu within the thirty-second retry limit")
+                break
+            }
+            remaining := FindPlaytimeClaimButtons136(w, h)
+            sameButton := false
+            for candidate in remaining {
+                if Abs(candidate.x - button.x) < Round(w * .015)
+                    && Abs(candidate.y - button.y) < Round(h * .015) {
+                    sameButton := true
+                    break
+                }
+            }
+            if sameButton && remaining.Length >= buttons.Length {
+                RuntimeLogWarn("playtime_claim_unconfirmed", "CLAIM remained available; refusing to click the same reward again")
+                break
+            }
+            claimed++
+            RuntimeLogInfo("playtime_claim_confirmed", "Confirmed a reward CLAIM disappeared", "claim=" claimed)
+            buttons := remaining
+        }
+        if claimed
+            LogToConsole("Collected " claimed " playtime reward(s).")
+        return claimed > 0
+    } finally {
+        if opened {
+            menu := FindPlaytimeRewardsMenu136(w, h)
+            if menu.status = "success" && menu.score >= .85
+                ClickPlay136(menu.x, menu.y)
+        }
+        NextCheckInterval := 28800000
+        UpdateDailyRewardTime()
+    }
 }
 
 UpdateDailyRewardTime() {
     global StateFile, NextCheckInterval
 
     if (!HasGlobal("NextCheckInterval") || NextCheckInterval == "") {
-        NextCheckInterval := 7200000
+        NextCheckInterval := 28800000
     }
 
     IniWrite(A_Now, StateFile, "State", "LastDailyCheck")
@@ -11870,7 +13748,7 @@ CheckDailyRewardTime() {
 
     lastCheckTime := IniRead(StateFile, "State", "LastDailyCheck", "")
 
-    currentIntervalMs := Integer(IniRead(StateFile, "State", "NextCheckInterval", "7200000"))
+    currentIntervalMs := 28800000
 
     if (lastCheckTime == "") {
         return true
@@ -12141,11 +14019,22 @@ FlushWebhookQueue() {
         PostWebhookDescription(WebhookLink, allMessages, 9868950, true)
 }
 
+SetRuntimeTimer136(name, callback, period) {
+    global ActiveRuntimeTimers
+    SetTimer(callback, period)
+    if (period = 0) {
+        if ActiveRuntimeTimers.Has(name)
+            ActiveRuntimeTimers.Delete(name)
+    } else {
+        ActiveRuntimeTimers[name] := {callback: callback, period: period}
+    }
+}
+
 StopRuntimeTimers() {
-    try SetTimer(UseAbilities, 0)
-    try SetTimer(checkCondition, 0)
-    try SetTimer(CheckPopups, 0)
-    try SetTimer(CancelInviteIfAppeared, 0)
+    global ActiveRuntimeTimers
+    for _, timerInfo in ActiveRuntimeTimers
+        try SetTimer(timerInfo.callback, 0)
+    ActiveRuntimeTimers := Map()
 }
 
 StopApplicationTimers() {
@@ -12159,6 +14048,8 @@ StopApplicationTimers() {
     try SetTimer(Hoverwatchdog, 0)
     try SetTimer(WatchToolPreviews, 0)
     try SetTimer(ProcessCommands, 0)
+    try SetTimer(DiscordGatewayWatchdog, 0)
+    try DiscordGatewayStop()
     try OfficialRemoteShutdown()
 }
 
@@ -12176,10 +14067,65 @@ ReleaseHeldInput() {
         try SendEvent("{" MoveDirection " up}")
 }
 
+RecoverRuntimeFailure(reason) {
+    global RunningStrategy, StateFile, RestartLock
+    if !RunningStrategy
+        return false
+    RuntimeLogWarn("auto_recovery_requested", "Recoverable runtime issue; restarting without stopping the user's run",
+        "reason=" reason)
+    if !RestartLock
+        SafeReload()
+    return true
+}
+
+RecoveryRestartBackoff() {
+    global StateFile
+    now := A_Now
+    windowStart := IniRead(StateFile, "Recovery", "WindowStart", "")
+    previous := 0
+    try previous := Integer(IniRead(StateFile, "Recovery", "Count", "0"))
+    age := 999999
+    if RegExMatch(windowStart, "^\d{14}$") {
+        try age := DateDiff(now, windowStart, "Seconds")
+    }
+    if (age > 600 || age < 0) {
+        IniWrite(now, StateFile, "Recovery", "WindowStart")
+        previous := 0
+    }
+    count := Min(previous + 1, 100)
+    IniWrite(count, StateFile, "Recovery", "Count")
+    ; After a burst, wait while still running and responsive to F3 stop.
+    if count > 4
+        return Min(120000, (count - 4) * 30000)
+    return 0
+}
+
+RecoveryDeferredRestart() {
+    global RunningStrategy, RecoveryCooldownPending
+    RecoveryCooldownPending := false
+    if RunningStrategy
+        SafeReload()
+}
+
 SafeReload() {
-    global RestartLock, StateFile, RunningStrategy, OverlayHWND, MainGui
+    global RestartLock, StateFile, RunningStrategy, OverlayHWND, MainGui, RecoveryCooldownPending
+    if RecoveryCooldownPending
+        return
     if (RestartLock) {
         return
+    }
+    if (IsSet(RunningStrategy) && RunningStrategy) {
+        backoff := RecoveryRestartBackoff()
+        if backoff > 0 {
+            RuntimeLogWarn("recovery_cooldown", "Recovery rate-limited to avoid a restart storm",
+                "delay_ms=" backoff)
+            MacroPhase("recovery_cooldown", backoff + 180000)
+            RecoveryCooldownPending := true
+            SetTimer(RecoveryDeferredRestart, -backoff)
+            return
+        }
+    } else {
+        try SetTimer(RecoveryDeferredRestart, 0)
     }
     RestartLock := true
 
@@ -12357,7 +14303,6 @@ HandleExit(ExitReason, ExitCode) {
             IniDelete(StateFile, "State", "TotalTimeSeconds")
             IniDelete(StateFile, "State", "Timescale")
             IniDelete(StateFile, "State", "TimeWhenStartedPlaying")
-            IniDelete(StateFile, "State", "Equipped")
             IniDelete(StateFile, "State", "HeartbeatPhase")
             IniDelete(StateFile, "State", "HeartbeatTick")
             IniDelete(StateFile, "State", "HeartbeatTimeout")
@@ -12706,7 +14651,8 @@ StratInfo(title := "unknown strat", author := "darksen", RequiredTowrs := "error
     MsgBox(text, "Strategy Info | " title, 0x1040)
 }
 
-ReadMessage(includeStr := "", includeRx := "", excludeStr := "", excludeRx := "") {
+ReadMessage(includeStr := "", includeRx := "", excludeStr := "", excludeRx := "", &recognizedText := "", rawColors := false) {
+    recognizedText := ""
     langCode := "en-US"
     for availableLang in StrSplit(OCR.GetAvailableLanguages(), "`n", "`r") {
         if (availableLang != "" && SubStr(availableLang, 1, 2) = "en") {
@@ -12733,21 +14679,27 @@ ReadMessage(includeStr := "", includeRx := "", excludeStr := "", excludeRx := ""
         pBitmap := Gdip_BitmapFromScreen(x "|" y "|" width "|" height)
         if !pBitmap
             return false
-        pGraphics := Gdip_GraphicsFromImage(pBitmap)
-        Matrix := "
-        (
-            5.0|0.0|0.0|0.0|0.0|
-            0.0|-5.0|0.0|0.0|0.0|
-            0.0|0.0|-5.0|0.0|0.0|
-            0.0|0.0|0.0|1.0|0.0|
-            -2.5|1.0|1.0|0.0|1.0
-        )"
-        pBitmapFiltered := Gdip_CreateBitmap(width, height)
-        pGraphicsFiltered := Gdip_GraphicsFromImage(pBitmapFiltered)
-        Gdip_DrawImage(pGraphicsFiltered, pBitmap, 0, 0, width, height, 0, 0, width, height, Matrix)
-        hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmapFiltered)
+        if rawColors {
+            hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmap)
+        } else {
+            pGraphics := Gdip_GraphicsFromImage(pBitmap)
+            Matrix := "
+            (
+                5.0|0.0|0.0|0.0|0.0|
+                0.0|-5.0|0.0|0.0|0.0|
+                0.0|0.0|-5.0|0.0|0.0|
+                0.0|0.0|0.0|1.0|0.0|
+                -2.5|1.0|1.0|0.0|1.0
+            )"
+            pBitmapFiltered := Gdip_CreateBitmap(width, height)
+            pGraphicsFiltered := Gdip_GraphicsFromImage(pBitmapFiltered)
+            Gdip_DrawImage(pGraphicsFiltered, pBitmap, 0, 0, width, height, 0, 0, width, height, Matrix)
+            hBitmap := Gdip_CreateHBITMAPFromBitmap(pBitmapFiltered)
+        }
 
-        ocrText := OCR.FromBitmap(hBitmap, { lang: langCode, scale: 3, grayscale: 1 }).Text
+        grayscale := rawColors ? 0 : 1
+        ocrText := OCR.FromBitmap(hBitmap, { lang: langCode, scale: 3, grayscale: grayscale }).Text
+        recognizedText := ocrText
     } catch Error as ocrErr {
         RuntimeLogWarn("readmessage_ocr_failed", "Message OCR failed", "error=" ocrErr.Message)
         return false

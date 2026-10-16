@@ -7,7 +7,7 @@ ExportProfile(*) {
     global TimeScaleMode, UseRestartBtn, UsePlayAgainBtn, CheckTheMap
     global UseNumbersForHotbar, CollectPlaytimeRewards, UseHForUpgrade
     global PotatoMode, DefaultMouseSpeed, MouseDelay, KeyDelay, UpgradeDelay
-    global RotateStrategies, SwapAmount, SwapUnit, AutoEquip, LegacyMode
+    global RotateStrategies, SwapAmount, SwapUnit, LegacyMode
     global ChainKey, BeatKey, CaravanKey, EnforcerVanKey, RaiseDeadKey, HologramKey, RepoKey
     global CancelPlacementKey, UpgradeTowerGKey, UpgradeTowerGBKey
     global PlaceTowerKey, UpgradeTowerKey, AlignCameraKey, ChangeDJTrackKey
@@ -54,7 +54,6 @@ ExportProfile(*) {
         "RotateStrategies", RotateStrategies,
         "SwapAmount", SwapAmount,
         "SwapUnit", SwapUnit,
-        "AutoEquip", AutoEquip,
         "LegacyMode", LegacyMode
     )
     s["Hotkeys"] := Map(
@@ -460,7 +459,7 @@ ProfileSettingAllowed(section, key) {
     allowed := Map(
         "Options", ["TimeScaleMode", "UseRestartBtn", "UsePlayAgainBtn", "CheckTheMap", "UseNumbers",
             "CollectPlaytimeRewards", "UseHotkeyForUpgrade", "PotatoMode", "DefaultMouseSpeed", "MouseDelay",
-            "KeyDelay", "UpgradeDelay", "RotateStrategies", "SwapAmount", "SwapUnit", "AutoEquip", "LegacyMode"],
+            "KeyDelay", "UpgradeDelay", "RotateStrategies", "SwapAmount", "SwapUnit", "LegacyMode"],
         "Hotkeys", ["Chain", "Beat", "Caravan", "EnforcerVan", "RaiseTheDead", "Hologram", "Repo", "CancelPlacement", "UpgradeTower",
             "UpgradeBottom"],
         "RecordingHotkeys", ["PlaceTowerKey", "UpgradeTowerKey", "AlignCameraKey", "ChangeDJTrackKey", "SellTowerKey",

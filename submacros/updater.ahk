@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 if (A_LineFile = A_ScriptFullPath)
@@ -111,34 +111,67 @@ NormalizeMacroVersion(version) {
 }
 
 CompareMacroVersions(leftVersion, rightVersion) {
-    leftNormalized := NormalizeMacroVersion(leftVersion)
-    rightNormalized := NormalizeMacroVersion(rightVersion)
-    leftCore := RegExReplace(leftNormalized, "[^0-9.].*$", "")
-    rightCore := RegExReplace(rightNormalized, "[^0-9.].*$", "")
+    ; Compare core versions numerically, not as strings (rc.10 > rc.9).
+    ; Stable versions sort above -rc/-beta prereleases, while the project's
+    ; legacy letter patch suffix (e.g. 1.3.4a) sorts after 1.3.4.
+    leftText := RegExReplace(NormalizeMacroVersion(leftVersion), "\+.*$", "")
+    rightText := RegExReplace(NormalizeMacroVersion(rightVersion), "\+.*$", "")
+    leftCore := RegExReplace(leftText, "[^0-9.].*$", "")
+    rightCore := RegExReplace(rightText, "[^0-9.].*$", "")
+    if (leftCore = "" || rightCore = "")
+        return StrCompare(leftText, rightText, false)
 
-    left := StrSplit(leftCore, ".")
-    right := StrSplit(rightCore, ".")
-    count := Max(left.Length, right.Length)
-
-    loop count {
-        l := (A_Index <= left.Length && left[A_Index] != "") ? Integer(left[A_Index]) : 0
-        r := (A_Index <= right.Length && right[A_Index] != "") ? Integer(right[A_Index]) : 0
-
-        if (l > r)
+    lParts := StrSplit(leftCore, ".")
+    rParts := StrSplit(rightCore, ".")
+    count := Max(lParts.Length, rParts.Length)
+    Loop count {
+        l := (A_Index <= lParts.Length && lParts[A_Index] != "") ? Integer(lParts[A_Index]) : 0
+        r := (A_Index <= rParts.Length && rParts[A_Index] != "") ? Integer(rParts[A_Index]) : 0
+        if l > r
             return 1
-        if (l < r)
+        if l < r
             return -1
     }
 
-    leftSuffix := SubStr(leftNormalized, StrLen(leftCore) + 1)
-    rightSuffix := SubStr(rightNormalized, StrLen(rightCore) + 1)
-    if (leftSuffix = rightSuffix)
+    lSuffix := SubStr(leftText, StrLen(leftCore) + 1)
+    rSuffix := SubStr(rightText, StrLen(rightCore) + 1)
+    if lSuffix = rSuffix
         return 0
-    if (leftSuffix = "")
-        return -1
-    if (rightSuffix = "")
-        return 1
-    return StrCompare(leftSuffix, rightSuffix, false)
+    ; -rc/-beta suffix: prerelease is older than the stable release.
+    ; A letter-only suffix is a legacy follow-up release, not a prerelease.
+    if lSuffix = ""
+        return SubStr(rSuffix, 1, 1) = "-" ? 1 : -1
+    if rSuffix = ""
+        return SubStr(lSuffix, 1, 1) = "-" ? -1 : 1
+    if (SubStr(lSuffix, 1, 1) = "-") != (SubStr(rSuffix, 1, 1) = "-")
+        return SubStr(lSuffix, 1, 1) = "-" ? -1 : 1
+
+    ; Project builds use labels such as -rc.4-hotfix.1.
+    ; Treat both dot and dash as separators so rc.5 > rc.4-hotfix.1.
+    lParts := StrSplit(LTrim(lSuffix, "-"), ".-")
+    rParts := StrSplit(LTrim(rSuffix, "-"), ".-")
+    count := Min(lParts.Length, rParts.Length)
+    Loop count {
+        l := lParts[A_Index]
+        r := rParts[A_Index]
+        lNumeric := RegExMatch(l, "^\d+$") != 0
+        rNumeric := RegExMatch(r, "^\d+$") != 0
+        if (lNumeric && rNumeric) {
+            if Integer(l) > Integer(r)
+                return 1
+            if Integer(l) < Integer(r)
+                return -1
+        } else if (lNumeric != rNumeric) {
+            return lNumeric ? -1 : 1
+        } else {
+            delta := StrCompare(l, r, false)
+            if delta != 0
+                return delta > 0 ? 1 : -1
+        }
+    }
+    if lParts.Length = rParts.Length
+        return 0
+    return lParts.Length > rParts.Length ? 1 : -1
 }
 
 QuoteArg(value) {

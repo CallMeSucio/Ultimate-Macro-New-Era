@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 #NoTrayIcon
 
@@ -17,8 +17,11 @@ SetWorkingDir(A_ScriptDir "\..\")
 #Include "%A_LineFile%\..\..\lib\OCR.ahk"
 #Include "%A_LineFile%\..\..\lib\Roblox.ahk"
 #Include "%A_LineFile%\..\..\lib\RuntimeLog.ahk"
+#Include "%A_LineFile%\..\..\lib\AutomatedLogs.ahk"
+#Include "%A_LineFile%\..\..\lib\SessionHistory136.ahk"
+#Include "%A_LineFile%\..\..\lib\SmartAlerts136.ahk"
 
-RuntimeLogInstall("Watchdog", "1.3.5")
+RuntimeLogInstall("Watchdog", "1.3.6-b2-hotfix4-local")
 RuntimeLogInfo("watchdog_start", "Watchdog started")
 
 Opt := A_AppData "\Ultimate_Macro\Options"
@@ -30,6 +33,8 @@ global WebhookLink := IniRead(SettingsFile, "Webhook", "Link", "")
 tWebhook := IniRead(SettingsFile, "Webhook", "Enabled", 0)
 global WebhookEnabled := (tWebhook = 1) ? true : false
 global SendCurrenciesEnabled := IniRead(SettingsFile, "Webhook", "SendCurrencies", 1)
+global ReviewHistoryEnabled136 := IniRead(SettingsFile, "ReviewHistory", "Enabled", "1") = "1"
+global ReviewAlertsEnabled136 := IniRead(SettingsFile, "ReviewAlerts", "Enabled", "0") = "1"
 global WebhookScreenshots := IniRead(SettingsFile, "Webhook", "WebhookScreenshots", 1)
 global WebhookTriumphScreenshots := IniRead(SettingsFile, "Webhook", "WebhookTriumphScreenshots", 1)
 global WebhookSepatateTriumphScreenshots := IniRead(SettingsFile, "Webhook", "WebhookSepatateTriumphScreenshots", 0)
@@ -89,6 +94,7 @@ loop {
 
         RuntimeLogError("main_process_missing", "Main process exited while the strategy was marked running",
             "main_pid=" MainPID)
+        try AutoLogsEvent(StateFile, "recovery_cause", "MainProcessMissing")
         RestartMain()
         ExitApp()
     }
@@ -109,6 +115,7 @@ loop {
                 RuntimeLogError("main_stalled", "Main made no progress within its phase budget",
                     "phase=" phase "; stalled_ms=" stalledFor "; budget_ms=" hbTimeout)
                 stallText := "Macro stalled in '" phase "' for " Round(stalledFor / 1000) "s - restarting"
+                try AutoLogsEvent(StateFile, "recovery_cause", "MainStalled phase=" phase "; ms=" stalledFor)
                 if (WebhookEnabled && WebhookLink != "") {
                     pBitmap := CaptureRobloxClientBitmap()
                     if (pBitmap) {
@@ -124,6 +131,7 @@ loop {
 
     if WinExist("Roblox Crash") {
         RuntimeLogError("roblox_crash_detected", "Roblox Crash window detected")
+        try AutoLogsEvent(StateFile, "recovery_cause", "RobloxCrash")
         if (WebhookEnabled && WebhookLink != "") {
             pBitmap := CaptureRobloxClientBitmap()
             if (pBitmap) {
@@ -137,6 +145,7 @@ loop {
 
     if !WinExist("Roblox ahk_exe RobloxPlayerBeta.exe") && !WinExist("Roblox ahk_exe ApplicationFrameHost.exe") {
         RuntimeLogError("roblox_process_missing", "Roblox process/window is no longer present")
+        try AutoLogsEvent(StateFile, "recovery_cause", "RobloxMissing")
         if (WebhookEnabled && WebhookLink != "")
             SendScreenshot(0, "Roblox is not running!", 12434877, 0)
         RestartMain()
@@ -153,6 +162,7 @@ loop {
             if ImageSearch(&FoundX, &FoundY, 0, 0, sw, sh, "*26 Resources/Disconnected.png") {
                 RuntimeLogWarn("roblox_disconnect_detected", "Disconnected dialog detected",
                     "template=Disconnected.png")
+                try AutoLogsEvent(StateFile, "recovery_cause", "DisconnectedDialog1")
                 CoordMode("Pixel", "Client")
                 if (WebhookEnabled && WebhookLink != "") {
                     pBitmap := CaptureRobloxClientBitmap()
@@ -166,6 +176,7 @@ loop {
             } else if ImageSearch(&FoundX, &FoundY, 0, 0, sw, sh, "*26 Resources/disconnected2.png") {
                 RuntimeLogWarn("roblox_disconnect_detected", "Disconnected dialog detected",
                     "template=disconnected2.png")
+                try AutoLogsEvent(StateFile, "recovery_cause", "DisconnectedDialog2")
                 CoordMode("Pixel", "Client")
                 if (WebhookEnabled && WebhookLink != "") {
                     pBitmap := CaptureRobloxClientBitmap()
@@ -189,11 +200,16 @@ loop {
         resTriumph1 := AdvancedImageSearch(TriumphImg1, w * 0.2, h * 0.2, w * 0.6, h * 0.7)
 
         if (resTriumph1.status == "success" && resTriumph1.score > 0.7) {
-            if ((WebhookEnabled && WebhookLink != "") || botEnabled) {
+            if ((WebhookEnabled && WebhookLink != "") || botEnabled || ReviewHistoryEnabled136 || ReviewAlertsEnabled136 || IniRead(StateFile, "ReviewRemote", "StopAfterMatch", "0") = "1") {
                 CloseMain()
                 Sleep 1300
                 SendInfo("Triumph")
             }
+            try AutoLogsFinish(StateFile, SettingsFile, "Triumph")
+            if ReviewStopAfterMatch136(StateFile)
+                ExitApp()
+            IniDelete(StateFile, "Recovery", "WindowStart")
+            IniDelete(StateFile, "Recovery", "Count")
             RestartMain()
             ExitApp()
         }
@@ -215,21 +231,31 @@ loop {
                 RuntimeLogWarn("match_result_corrected", "Loss banner matched while the triumph banner scored higher",
                     "loss_score=" lostScore "; triumph_score=" triumphScore)
 
-            if ((WebhookEnabled && WebhookLink != "") || botEnabled) {
+            if ((WebhookEnabled && WebhookLink != "") || botEnabled || ReviewHistoryEnabled136 || ReviewAlertsEnabled136 || IniRead(StateFile, "ReviewRemote", "StopAfterMatch", "0") = "1") {
                 CloseMain()
                 Sleep 1300
                 SendInfo(matchOutcome)
             }
+            try AutoLogsFinish(StateFile, SettingsFile, matchOutcome)
+            if ReviewStopAfterMatch136(StateFile)
+                ExitApp()
+            IniDelete(StateFile, "Recovery", "WindowStart")
+            IniDelete(StateFile, "Recovery", "Count")
             RestartMain()
             ExitApp()
         }
 
         if (playAgainScore > 0) {
-            if ((WebhookEnabled && WebhookLink != "") || botEnabled) {
+            if ((WebhookEnabled && WebhookLink != "") || botEnabled || ReviewHistoryEnabled136 || ReviewAlertsEnabled136 || IniRead(StateFile, "ReviewRemote", "StopAfterMatch", "0") = "1") {
                 CloseMain()
                 Sleep 1300
                 SendInfo("Triumph")
             }
+            try AutoLogsFinish(StateFile, SettingsFile, "Triumph")
+            if ReviewStopAfterMatch136(StateFile)
+                ExitApp()
+            IniDelete(StateFile, "Recovery", "WindowStart")
+            IniDelete(StateFile, "Recovery", "Count")
             RestartMain()
             ExitApp()
         }
@@ -347,9 +373,14 @@ SendInfo(matchResult := "") {
                 Gdip_DisposeImage(pBitmap)
             }
         }
+        if ReviewHistoryEnabled136
+            try HistoryAppend136(matchResult, timeInSeconds, "Unknown")
+        if ReviewAlertsEnabled136
+            try ReviewAlertLossStreak136(matchResult, SettingsFile, StateFile, WebhookLink)
         return
     }
 
+    ocrTarget := ""
     if (SendCurrenciesEnabled = "1") {
         if !GetRobloxScreenClientRect(&statClientX, &statClientY, ,)
             statClientX := 0, statClientY := 0
@@ -436,6 +467,26 @@ SendInfo(matchResult := "") {
             }
         }
 
+    }
+
+    coinsKnown136 := SendCurrenciesEnabled = "1" && RegExMatch(ocrTarget, "i)(\d[\d,]*)\s*c[o0]ins?")
+    gemsKnown136 := SendCurrenciesEnabled = "1" && RegExMatch(ocrTarget, "i)(\d[\d,]*)\s*(?:[g6c]\s*[e30c]ms?|[c]\s*[c]\s*ms?)")
+    expKnown136 := SendCurrenciesEnabled = "1" && RegExMatch(ocrTarget, "i)(?<![\+\d])(\d[\d,]*)\s*xp")
+    if ReviewHistoryEnabled136
+        try HistoryAppend136(matchResult, timeInSeconds, mapName,
+            coinsKnown136 ? coinVal : "", gemsKnown136 ? gemVal : "", expKnown136 ? expVal : "")
+    if ReviewAlertsEnabled136
+        try ReviewAlertLossStreak136(matchResult, SettingsFile, StateFile, WebhookLink)
+
+    ; OCR values are reported only when the OCR text actually contains evidence.
+    try AutoLogsEvent(StateFile, "observed_match", "result=" matchResult "; map=" mapName "; seconds=" timeInSeconds)
+    if (SendCurrenciesEnabled = "1") {
+        if RegExMatch(ocrTarget, "i)(\d[\d,]*)\s*c[o0]ins?")
+            try AutoLogsEvent(StateFile, "observed_coins", "value=" coinVal)
+        if RegExMatch(ocrTarget, "i)(\d[\d,]*)\s*[g6c]\s*[e30c]ms?")
+            try AutoLogsEvent(StateFile, "observed_gems", "value=" gemVal)
+        if RegExMatch(ocrTarget, "i)(?<![\+\d])(\d[\d,]*)\s*xp")
+            try AutoLogsEvent(StateFile, "observed_exp", "value=" expVal)
     }
 
     savedCoins := IniRead(StateFile, "State", "Coins", 0)
@@ -713,9 +764,44 @@ CloseMain() {
         try ProcessClose(MainPID)
 }
 
+WatchdogRecoveryCooldown() {
+    global StateFile
+    now := A_Now
+    window := IniRead(StateFile, "Recovery", "WindowStart", "")
+    count := 0
+    try count := Integer(IniRead(StateFile, "Recovery", "Count", 0))
+    age := 999999
+    if RegExMatch(window, "^\d{14}$") {
+        try age := DateDiff(now, window, "Seconds")
+    }
+    if (age > 600 || age < 0) {
+        IniWrite(now, StateFile, "Recovery", "WindowStart")
+        count := 0
+    }
+    count := Min(count + 1, 100)
+    IniWrite(count, StateFile, "Recovery", "Count")
+    return count > 4 ? Min(120000, (count - 4) * 30000) : 0
+}
+
 RestartMain() {
+    try AutoLogsFinish(StateFile, SettingsFile, "RecoveryRestart")
     RuntimeLogInfo("watchdog_restart_main", "Restarting Main after watchdog recovery event")
-    global MainPID, SettingsFile, WebhookLink, WebhookEnabled
+    global MainPID, SettingsFile, WebhookLink, WebhookEnabled, StateFile
+
+    if Integer(IniRead(StateFile, "State", "Running", "0")) {
+        delay := WatchdogRecoveryCooldown()
+        if delay > 0 {
+            RuntimeLogWarn("watchdog_recovery_cooldown", "Rate limiting rapid restarts", "ms=" delay)
+            deadline := A_TickCount + delay
+            while A_TickCount < deadline {
+                if !Integer(IniRead(StateFile, "State", "Running", "0"))
+                    ExitApp()
+                Sleep(1000)
+            }
+        }
+    }
+    if !Integer(IniRead(StateFile, "State", "Running", "0"))
+        ExitApp()
 
     if (MainPID && ProcessExist(MainPID))
         try ProcessClose(MainPID)

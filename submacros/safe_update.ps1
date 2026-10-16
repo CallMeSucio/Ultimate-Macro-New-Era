@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)][string]$DownloadUrl,
   [Parameter(Mandatory = $true)][string]$MacroDir,
   [Parameter(Mandatory = $true)][string]$ExpectedSha256,
@@ -131,6 +131,10 @@ function Assert-RuntimePayload([string]$Root) {
     'lib\Roblox.ahk',
     'lib\Discord.ahk',
     'lib\DiscordCommands.ahk',
+    'lib\DiscordGateway.ahk',
+    'discord-gateway\worker.mjs',
+    'discord-gateway\protocol.mjs',
+    'discord-gateway\access.mjs',
     'lib\OfficialRemote.ahk',
     'lib\Profiles.ahk',
     'lib\RuntimeLog.ahk',
@@ -306,7 +310,13 @@ try {
   if ($WaitPid -gt 0) {
     Write-Host "Waiting for macro process $WaitPid to exit..."
     try { Wait-Process -Id $WaitPid -Timeout 30 -ErrorAction Stop }
-    catch { Start-Sleep -Seconds 2 }
+    catch {
+      # If Main is still running, do NOT move files out from under it.
+      # Abort with the original installation untouched instead of racing the process.
+      if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+        throw "Ultimate Macro is still running (PID $WaitPid). Close it and retry the update."
+      }
+    }
   }
 
   if (Test-Path -LiteralPath $backupDir) {
@@ -324,6 +334,21 @@ try {
 
   Assert-RuntimePayload $MacroDir
   Assert-PayloadVersion $MacroDir $ExpectedVersion
+
+  # Older releases lack the new extract-first launcher. Preserve it from the
+  # verified pre-update backup until the official release packaging catches up.
+  foreach ($starter in @('Ultimate Macro.cmd', 'setup\Launch.ps1', 'setup\Repair.ps1')) {
+    $installedStarter = Join-Path $MacroDir $starter
+    $previousStarter = Join-Path $backupDir $starter
+    if (-not (Test-Path -LiteralPath $installedStarter -PathType Leaf) -and
+        (Test-Path -LiteralPath $previousStarter -PathType Leaf)) {
+      $starterParent = Split-Path -Parent $installedStarter
+      if (-not (Test-Path -LiteralPath $starterParent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $starterParent | Out-Null
+      }
+      Copy-Item -LiteralPath $previousStarter -Destination $installedStarter
+    }
+  }
   $strategyConflictCount = Restore-PreservedStrategies $preservedStratsDir $MacroDir $ExpectedVersion
 
   if ([string]::IsNullOrWhiteSpace($LogDir)) {
@@ -340,15 +365,18 @@ try {
 
   if (-not $NoLaunch) {
     $mainAhk = Join-Path $MacroDir 'Main.ahk'
+    $bundledAhk = Join-Path $MacroDir 'submacros\AutoHotkey64.exe'
     $mainExe = Join-Path $MacroDir 'ultimate_macro.exe'
-    if (Test-Path -LiteralPath $mainAhk) {
-      Start-Process -FilePath $mainAhk -WorkingDirectory $MacroDir
+    if ((Test-Path -LiteralPath $mainAhk -PathType Leaf) -and
+        (Test-Path -LiteralPath $bundledAhk -PathType Leaf)) {
+      # The updater must not depend on Windows .ahk file associations.
+      Start-Process -FilePath $bundledAhk -ArgumentList ('"' + $mainAhk + '"') -WorkingDirectory $MacroDir
     }
-    elseif (Test-Path -LiteralPath $mainExe) {
+    elseif (Test-Path -LiteralPath $mainExe -PathType Leaf) {
       Start-Process -FilePath $mainExe -WorkingDirectory $MacroDir
     }
     else {
-      throw 'Update installed, but no launchable Main.ahk or ultimate_macro.exe was found.'
+      throw 'Update installed, but no bundled AutoHotkey runtime or standalone executable was found.'
     }
   }
 

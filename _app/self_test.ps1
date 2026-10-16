@@ -167,7 +167,7 @@ if ($mainText -notmatch 'wasRunning := IsSet\(RunningStrategy\)' -or $mainText -
 $zoomTable = 'Map\("cataclysm", 1\)'
 if ($mainText -notmatch $zoomTable -or $hostText -notmatch $zoomTable -or $replayText -notmatch $zoomTable) { Fail 'Macro, host and replay disagree about the map specific camera zoom table' } else { Pass 'Map specific camera zoom table matches across macro, host and replay' }
 if ($mainText -notmatch 'ApplyMapCameraZoom\(\) >= 0') { Fail 'Cataclysm path does not apply the shared map camera zoom' } else { Pass 'Cataclysm path applies the shared map camera zoom' }
-if ($html -notmatch 'Strategy Lab v4\.3 · pizzaroles24') { Fail 'Strategy Lab v4.3 credit/version marker is missing' } else { Pass 'Strategy Lab v4.3 credit/version marker' }
+if ($html -notmatch 'Strategy Lab v4\.1 · pizzaroles24') { Fail 'Strategy Lab v4.1 credit/version marker is missing' } else { Pass 'Strategy Lab v4.1 credit/version marker' }
 
 if ($failures.Count -gt 0) {
   Write-Host ''

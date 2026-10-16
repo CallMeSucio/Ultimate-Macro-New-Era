@@ -230,7 +230,7 @@ RuntimeLogExportBundle(destination := "") {
             maxChars := 350000
             if (StrLen(content) > maxChars)
                 content := "[older content truncated]`n" SubStr(content, StrLen(content) - maxChars + 1)
-            FileAppend("`n===== " item.label " =====`n" content "`n", destination, "UTF-8")
+            FileAppend("`n===== " item.label " =====`n" RuntimeLogRedact(content) "`n", destination, "UTF-8")
         }
         return destination
     } catch {
@@ -295,6 +295,8 @@ RuntimeLogSafeFile(path) {
 
 RuntimeLogRedact(value) {
     text := String(value)
+    ; Include other testers' profiles and JSON-escaped multiline stack paths.
+    text := RegExReplace(text, "i)[A-Z]:[\\/]+Users[\\/]+[^\\/\r\n]+", "[USERPROFILE]")
 
     text := RegExReplace(
         text,
