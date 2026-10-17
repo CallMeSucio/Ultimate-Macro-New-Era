@@ -1,20 +1,21 @@
+/********************************************
+* @Author SP
+* @Description Class to interact with Discord
+*********************************************/
+
+; Originally derived from Natro Macro.
+; New Era hardening keeps one request path for retries/rate limits while
+; preserving caller-owned bitmap lifetime.
+
 class Discord
 {
     static baseURL := "https://discord.com/api/v10/"
-    static ComponentsV2Flag := 32768
-    static ColorInfo := 0x5865F2
-    static ColorSuccess := 0x55C477
-    static ColorWarning := 0xE8A24A
-    static ColorDanger := 0xF06B7A
-    static ColorNeutral := 0x657084
-    static ColorPurple := 0xA970FF
-    static LastStatus := 0
-    static LastResponseText := ""
-    static LastError := ""
 
     static EscapeJson(value)
     {
         value := String(value)
+        ; Existing macro callsites frequently use literal \n / \t sequences to
+        ; describe Discord formatting. Normalize those before JSON escaping.
         value := StrReplace(value, "\r\n", "`n")
         value := StrReplace(value, "\n", "`n")
         value := StrReplace(value, "\t", "`t")
@@ -26,260 +27,98 @@ class Discord
         return value
     }
 
-    static SendEmbed(message, color := 0x5865F2, content := "", pBitmap := 0, channel := "", replyID := 0)
+    static SendEmbed(message, color:=3223350, content:="", pBitmap:=0, channel:="", replyID:=0)
     {
-        if (content != "")
-            message := content "`n`n" message
+        message := this.EscapeJson(message)
+        content := this.EscapeJson(content)
+        colorValue := IsNumber(color) ? Integer(color) : 3223350
+
+        payload_json :=
+        (
+        '
+        {
+            "content": "' content '",
+            "embeds": [{
+                "description": "' message '",
+                "color": ' colorValue '
+                ' (pBitmap ? (',"image": {"url": "attachment://ss.png"}') : '') '
+            }]
+            ' (replyID ? (',"allowed_mentions": {"parse": []}, "message_reference": {"message_id": "' replyID '", "fail_if_not_exists": false}') : '') '
+        }
+        '
+        )
+
         if pBitmap
-            return this.SendScreenshot(pBitmap, message, color, channel, replyID)
-        return this.SendCard(message, color, , channel, replyID)
+            this.CreateFormData(&postdata, &contentType, [Map("name","payload_json","content-type","application/json","content",payload_json), Map("name","files[0]","filename","ss.png","content-type","image/png","pBitmap",pBitmap)])
+        else
+            postdata := payload_json, contentType := "application/json"
+
+        return this.SendMessageAPI(postdata, contentType, channel)
     }
 
-    static SendCard(message, color := 0x5865F2, buttons := "", channel := "", replyID := 0)
-    {
-        children := [Map("type", 10, "content", this.TruncateText(message, 3900))]
-        buttonRow := this.BuildButtonRow(buttons)
-        if (Type(buttonRow) = "Map") {
-            children.Push(Map("type", 14, "divider", JSON.true, "spacing", 1))
-            children.Push(buttonRow)
-        }
-
-        payload := this.BuildComponentsPayload(children, color, replyID)
-        return this.SendMessageAPI(payload, "application/json", channel)
-    }
-
-    static SendConnectionNotice(prefix := "!", channel := "", gatewayEnabled := false)
-    {
-        commandHint := prefix "help"
-        if gatewayEnabled
-            commandHint .= " or /help"
-        message := "**Connected to Discord**`n"
-            . "The personal bot is online and ready for commands.`n`n"
-            . "Try " commandHint " to see what is available.`n`n"
-            . "If it does not reply, enable Message Content Intent under Developer Portal > Bot and check View Channel, Send Messages and Read Message History."
-        buttons := [
-            Map("label", "Bot not responding?", "url", "https://support-dev.discord.com/hc/en-us/articles/4404772028055-Message-Content-Privileged-Intent-FAQ"),
-            Map("label", "Open Developer Portal", "url", "https://discord.com/developers/applications")
-        ]
-        if gatewayEnabled
-            buttons.Push(Map("label", "Health check", "custom_id", "bot:health"))
-        return this.SendCard(message, this.ColorSuccess, buttons, channel)
-    }
-
-    static BuildButtonRow(buttons)
-    {
-        if !IsObject(buttons)
-            return []
-
-        row := []
-        for button in buttons {
-            if !IsObject(button) || !button.Has("label")
-                continue
-
-            payload := Map("type", 2, "label", SubStr(String(button["label"]), 1, 80))
-            if button.Has("url") {
-                payload["style"] := 5
-                payload["url"] := String(button["url"])
-            } else if button.Has("custom_id") {
-                payload["style"] := button.Has("style") ? Integer(button["style"]) : 2
-                payload["custom_id"] := String(button["custom_id"])
-            } else {
-                continue
-            }
-            row.Push(payload)
-            if row.Length >= 5
-                break
-        }
-
-        return row.Length ? Map("type", 1, "components", row) : []
-    }
-
-    static BuildStringSelectRow(customID, options, placeholder := "Choose an option")
-    {
-        if !IsObject(options)
-            return []
-
-        normalized := []
-        for option in options {
-            if !IsObject(option) || !option.Has("label") || !option.Has("value")
-                continue
-            normalized.Push(Map(
-                "label", this.TruncateText(String(option["label"]), 100),
-                "value", this.TruncateText(String(option["value"]), 100)
-            ))
-            if normalized.Length >= 25
-                break
-        }
-
-        if !normalized.Length
-            return []
-
-        select := Map(
-            "type", 3,
-            "custom_id", this.TruncateText(String(customID), 100),
-            "placeholder", this.TruncateText(String(placeholder), 150),
-            "min_values", 1,
-            "max_values", 1,
-            "options", normalized
-        )
-        return Map("type", 1, "components", [select])
-    }
-
-    static BuildComponentsPayload(children, color := 0x5865F2, replyID := 0)
-    {
-        colorValue := IsNumber(color) ? Integer(color) : this.ColorInfo
-        payload := Map(
-            "flags", this.ComponentsV2Flag,
-            "allowed_mentions", Map("parse", []),
-            "components", [Map("type", 17, "accent_color", colorValue, "components", children)]
-        )
-
-        replyID := this.ResolveReplyID(replyID)
-        if (replyID != 0)
-            payload["message_reference"] := Map("message_id", String(replyID), "fail_if_not_exists", JSON.false)
-
-        return JSON.stringify(payload, 0, "")
-    }
-
-    static SendComponents(children, color := 0x5865F2, channel := "", replyID := 0)
-    {
-        payload := this.BuildComponentsPayload(children, color, replyID)
-        return this.SendMessageAPI(payload, "application/json", channel)
-    }
-
-    static ResolveReplyID(replyID := 0)
-    {
-        if (replyID != 0)
-            return replyID
-        global BotActiveInteraction
-        if IsObject(BotActiveInteraction)
-            return 0
-        global BotActiveReplyID
-        return IsSet(BotActiveReplyID) ? BotActiveReplyID : 0
-    }
-
-    static TruncateText(value, maxChars := 3900)
-    {
-        value := String(value)
-        return StrLen(value) <= maxChars ? value : SubStr(value, 1, maxChars - 3) "..."
-    }
-
-    static IsValidSnowflake(value)
-    {
-        return RegExMatch(Trim(String(value)), "^\d{15,22}$")
-    }
-
+    ; No full-desktop default. Callers may pass CaptureRobloxClientBitmap(), or
+    ; omit the bitmap for a text-only embed when Roblox is unavailable.
     static SendScreenshot(pBitmap := 0, description := "", color := 12434877, channel := "", replyID := 0)
     {
-        colorValue := IsNumber(color) ? Integer(color) : this.ColorInfo
-        children := [Map("type", 10, "content", this.TruncateText(description != "" ? description : "Screenshot", 3900))]
+        escapedDescription := this.EscapeJson(description)
+        colorValue := IsNumber(color) ? Integer(color) : 12434877
+
         fields := []
-
-        if pBitmap {
-            children.Push(Map(
-                "type", 12,
-                "items", [Map(
-                    "media", Map("url", "attachment://screenshot.png"),
-                    "description", "Screenshot from Ultimate Macro"
-                )]
-            ))
-        }
-
-        payload_json := this.BuildComponentsPayload(children, colorValue, replyID)
+        payload_json := '{"embeds": [{"description": "' escapedDescription '", "color": ' colorValue '}]}'
         fields.Push(Map("name", "payload_json", "content-type", "application/json", "content", payload_json))
 
         if pBitmap
+        {
+            payload_json := '{"embeds": [{"description": "' escapedDescription '", "color": ' colorValue ', "image": {"url": "attachment://screenshot.png"}}]}'
+            fields[1] := Map("name", "payload_json", "content-type", "application/json", "content", payload_json)
             fields.Push(Map("name", "files[0]", "filename", "screenshot.png", "content-type", "image/png", "pBitmap", pBitmap))
+        }
 
         this.CreateFormData(&postdata, &contentType, fields)
         return this.SendMessageAPI(postdata, contentType, channel)
     }
 
-    static SendImage(pBitmap, imgname := "image.png", replyID := 0)
+    static SendImage(pBitmap, imgname:="image.png", replyID:=0)
     {
-        children := [Map(
-            "type", 12,
-            "items", [Map("media", Map("url", "attachment://" imgname), "description", "Image from Ultimate Macro")]
-        )]
-        params := [Map(
-            "name", "payload_json",
-            "content-type", "application/json",
-            "content", this.BuildComponentsPayload(children, this.ColorInfo, replyID)
-        )]
-        params.Push(Map("name", "files[0]", "filename", imgname, "content-type", "image/png", "pBitmap", pBitmap))
+        params := []
+        (replyID > 0) && params.Push(Map("name","payload_json","content-type","application/json","content",'{"allowed_mentions": {"parse": []}, "message_reference": {"message_id": "' replyID '", "fail_if_not_exists": false}}'))
+        params.Push(Map("name","files[0]","filename",imgname,"content-type","image/png","pBitmap",pBitmap))
         this.CreateFormData(&postdata, &contentType, params)
         return this.SendMessageAPI(postdata, contentType)
     }
 
-    static SendMessageAPI(postdata, contentType := "application/json", channel := "", url := "")
+    static SendMessageAPI(postdata, contentType:="application/json", channel:="", url:="")
     {
         global ChannelID
-        global BotActiveInteraction, BotInteractionReplied
 
-        interactionRequest := false
-        requestMethod := "POST"
+        if (!channel && ChannelID)
+            channel := ChannelID
 
-        if !url {
-            if IsObject(BotActiveInteraction) && BotActiveInteraction.Has("application_id")
-                && BotActiveInteraction.Has("token") {
-                interactionRequest := true
-                url := this.baseURL "webhooks/" BotActiveInteraction["application_id"] "/" BotActiveInteraction["token"]
-                if !BotInteractionReplied {
-                    requestMethod := "PATCH"
-                    url .= "/messages/@original"
-                    BotInteractionReplied := true
-                }
-            } else {
-                if (!channel && ChannelID)
-                    channel := ChannelID
-                url := this.baseURL "channels/" channel "/messages"
-            }
-        }
+        if !url
+            url := this.baseURL "channels/" channel "/messages"
 
-        return this.Request(requestMethod, url, postdata, contentType, 3, !interactionRequest)
+        return this.Request("POST", url, postdata, contentType)
     }
 
     static GetCommands(channel)
     {
-        global UserID, BotPrefix, command_buffer
+        global UserID, command_buffer
         messages := this.GetRecentMessages(channel)
 
         for msg in messages {
-            if !msg.Has("author") || msg["author"]["id"] != UserID
+            if (msg["author"]["id"] != UserID)
                 continue
 
             content := Trim(msg["content"])
-            prefix := SubStr(content, 1, 1)
-            if (prefix != "!" && prefix != BotPrefix)
+            if (SubStr(content, 1, 1) != "!")
                 continue
-            if (IsSet(BotSeenCommandIDs) && BotSeenCommandIDs.Has(msg["id"]))
-                continue
-
-            attachmentURL := ""
-            if msg.Has("attachments") {
-                attachments := msg["attachments"]
-                if (Type(attachments) = "Array" && attachments.Length > 0) {
-                    firstAttachment := attachments[1]
-                    if (IsObject(firstAttachment) && firstAttachment.Has("url"))
-                        attachmentURL := String(firstAttachment["url"])
-                }
-            }
 
             command_buffer.Push({
                 content: content,
                 id: msg["id"],
-                url: attachmentURL,
+                url: msg["attachments"].Has(1) ? msg["attachments"][1]["url"] : "",
                 user_id: msg["author"]["id"]
             })
-            if IsSet(BotSeenCommandIDs) {
-                BotSeenCommandIDs[msg["id"]] := A_TickCount
-                if (BotSeenCommandIDs.Count > 500) {
-                    for seenID, seenTick in BotSeenCommandIDs {
-                        BotSeenCommandIDs.Delete(seenID)
-                        break
-                    }
-                }
-            }
         }
     }
 
@@ -297,29 +136,31 @@ class Discord
     {
         static lastmsg := Map()
 
+        ; On the first poll after a macro restart, establish a baseline but do
+        ; not replay the last command from before the restart.
         if !lastmsg.Has(channel) {
             try
                 firstMessages := JSON.parse(this.GetMessageAPI("?limit=1", channel))
             catch
                 return []
 
-            if (Type(firstMessages) = "Array" && firstMessages.Length > 0)
+            if firstMessages.Has(1)
                 lastmsg[channel] := firstMessages[1]["id"]
             return []
         }
 
         try
-            messages := JSON.parse(this.GetMessageAPI("?after=" lastmsg[channel] "&limit=100", channel))
+            messages := JSON.parse(this.GetMessageAPI("?after=" lastmsg[channel], channel))
         catch
             return []
 
-        if (Type(messages) = "Array" && messages.Length > 0)
+        if (messages.Has(1))
             lastmsg[channel] := messages[1]["id"]
 
         return messages
     }
 
-    static GetMessageAPI(params := "", channel := "")
+    static GetMessageAPI(params:="", channel:="")
     {
         global ChannelID
         if !channel
@@ -327,13 +168,13 @@ class Discord
         return this.Request("GET", this.baseURL "channels/" channel "/messages" params)
     }
 
-    static Request(method, url, body?, contentType := "", maxAttempts := 3, useBotToken := true)
+    ; Central Discord request path. Retries transient network failures, HTTP 429
+    ; using Discord's Retry-After/retry_after value, and 5xx server failures.
+    ; Authentication/permission/client errors are returned immediately.
+    static Request(method, url, body?, contentType := "", maxAttempts := 3)
     {
         global BotToken
         lastResponse := ""
-        this.LastStatus := 0
-        this.LastResponseText := ""
-        this.LastError := ""
 
         loop maxAttempts {
             try {
@@ -341,11 +182,11 @@ class Discord
                 wr.Option[9] := 2720
                 wr.Open(method, url, false)
                 wr.SetRequestHeader("User-Agent", "DiscordBot (AHK, " A_AhkVersion ")")
-                if (useBotToken && BotToken != "")
+                if (BotToken != "")
                     wr.SetRequestHeader("Authorization", "Bot " BotToken)
                 if (contentType != "")
                     wr.SetRequestHeader("Content-Type", contentType)
-                wr.SetTimeouts(5000, 5000, 15000, 15000)
+                wr.SetTimeouts(10000, 15000, 60000, 60000)
 
                 if IsSet(body)
                     wr.Send(body)
@@ -354,8 +195,6 @@ class Discord
 
                 status := wr.Status
                 lastResponse := wr.ResponseText
-                this.LastStatus := status
-                this.LastResponseText := lastResponse
 
                 if (status = 429) {
                     if (A_Index = maxAttempts)
@@ -372,8 +211,7 @@ class Discord
                 }
 
                 return lastResponse
-            } catch Error as err {
-                this.LastError := err.Message
+            } catch Error {
                 if (A_Index = maxAttempts)
                     return lastResponse
                 Sleep(Min(5000, 750 * A_Index))
@@ -415,88 +253,6 @@ class Discord
         return Min(30000, Max(500, Ceil(seconds * 1000) + 150))
     }
 
-    static SaveProtectedToken(settingsPath, token)
-    {
-        token := String(token)
-        if (token = "") {
-            try IniDelete(settingsPath, "Token", "TokenProtected")
-            try IniDelete(settingsPath, "Token", "BotToken")
-            return
-        }
-
-        input := Buffer(StrPut(token, "UTF-8"), 0)
-        size := StrPut(token, input, "UTF-8") - 1
-        inputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
-        outputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
-        NumPut("UInt", size, inputBlob, 0)
-        NumPut("Ptr", input.Ptr, inputBlob, A_PtrSize)
-
-        if !DllCall("Crypt32\CryptProtectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0,
-            "Ptr", 0, "UInt", 0x1, "Ptr", outputBlob.Ptr)
-            throw Error("Windows could not protect the Discord bot token.")
-
-        protectedSize := NumGet(outputBlob, 0, "UInt")
-        protectedPtr := NumGet(outputBlob, A_PtrSize, "Ptr")
-        try IniWrite(this.Base64EncodeBuffer(protectedPtr, protectedSize), settingsPath, "Token", "TokenProtected")
-        finally DllCall("Kernel32\LocalFree", "Ptr", protectedPtr)
-        try IniDelete(settingsPath, "Token", "BotToken")
-    }
-
-    static LoadProtectedToken(settingsPath)
-    {
-        encoded := IniRead(settingsPath, "Token", "TokenProtected", "")
-        if (encoded = "") {
-            legacy := IniRead(settingsPath, "Token", "BotToken", "")
-            if (legacy != "") {
-                this.SaveProtectedToken(settingsPath, legacy)
-                return legacy
-            }
-            return ""
-        }
-
-        try encrypted := this.Base64Decode(encoded)
-        catch
-            return ""
-
-        inputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
-        outputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
-        NumPut("UInt", encrypted.Size, inputBlob, 0)
-        NumPut("Ptr", encrypted.Ptr, inputBlob, A_PtrSize)
-        if !DllCall("Crypt32\CryptUnprotectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0,
-            "Ptr", 0, "UInt", 0x1, "Ptr", outputBlob.Ptr)
-            return ""
-
-        plainSize := NumGet(outputBlob, 0, "UInt")
-        plainPtr := NumGet(outputBlob, A_PtrSize, "Ptr")
-        try return StrGet(plainPtr, plainSize, "UTF-8")
-        finally DllCall("Kernel32\LocalFree", "Ptr", plainPtr)
-    }
-
-    static Base64EncodeBuffer(pointer, size)
-    {
-        chars := 0
-        DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001,
-            "Ptr", 0, "UIntP", &chars)
-        output := Buffer(chars * 2)
-        if !DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001,
-            "Ptr", output.Ptr, "UIntP", &chars)
-            throw Error("Could not protect the Discord bot token.")
-        return StrGet(output, "UTF-16")
-    }
-
-    static Base64Decode(value)
-    {
-        size := 0
-        if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1, "Ptr", 0,
-            "UIntP", &size, "Ptr", 0, "Ptr", 0)
-            throw Error("The protected Discord bot token could not be decoded.")
-        decodedBytes := Buffer(size)
-        if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1,
-            "Ptr", decodedBytes.Ptr, "UIntP", &size, "Ptr", 0, "Ptr", 0)
-            throw Error("The protected Discord bot token could not be decoded.")
-        return decodedBytes
-    }
-
     static CreateFormData(&retData, &contentType, fields)
     {
         static chars := "0|1|2|3|4|5|6|7|8|9|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z"
@@ -508,24 +264,21 @@ class Discord
             throw Error("Unable to allocate multipart buffer")
 
         pStream := 0
-        if DllCall("ole32\CreateStreamOnHGlobal", "Ptr", hData, "Int", 0, "PtrP", &pStream, "UInt") {
-            DllCall("GlobalFree", "Ptr", hData, "Ptr")
+        if DllCall("ole32\CreateStreamOnHGlobal", "Ptr", hData, "Int", 0, "PtrP", &pStream, "UInt")
             throw Error("Unable to create multipart stream")
-        }
 
-        pData := 0
         try {
             for field in fields
             {
                 str :=
                 (
-                    '
-                    
-                    ------------------------------' boundary '
-                    Content-Disposition: form-data; name="' field["name"] '"' (field.Has("filename") ? ('; filename="' field["filename"] '"') : "") '
-                    Content-Type: ' field["content-type"] '
-                    
-                    ' (field.Has("content") ? (field["content"] "`r`n") : "")
+                '
+
+                ------------------------------' boundary '
+                Content-Disposition: form-data; name="' field["name"] '"' (field.Has("filename") ? ('; filename="' field["filename"] '"') : "") '
+                Content-Type: ' field["content-type"] '
+
+                ' (field.Has("content") ? (field["content"] "`r`n") : "")
                 )
 
                 utf8 := Buffer(length := StrPut(str, "UTF-8") - 1)
@@ -539,7 +292,7 @@ class Discord
                         pFileStream := Gdip_SaveBitmapToStream(field["pBitmap"])
                         if !pFileStream
                             throw Error("Unable to encode screenshot")
-                        DllCall("shlwapi\IStream_Size", "Ptr", pFileStream, "UInt64P", &size := 0, "UInt")
+                        DllCall("shlwapi\IStream_Size", "Ptr", pFileStream, "UInt64P", &size:=0, "UInt")
                         DllCall("shlwapi\IStream_Reset", "Ptr", pFileStream, "UInt")
                         DllCall("shlwapi\IStream_Copy", "Ptr", pFileStream, "Ptr", pStream, "UInt", size, "UInt")
                     } finally {
@@ -555,7 +308,7 @@ class Discord
                         DllCall("shlwapi\SHCreateStreamOnFileEx", "WStr", field["file"], "Int", 0, "UInt", 0x80, "Int", 0, "Ptr", 0, "PtrP", &pFileStream)
                         if !pFileStream
                             throw Error("Unable to open multipart file")
-                        DllCall("shlwapi\IStream_Size", "Ptr", pFileStream, "UInt64P", &size := 0, "UInt")
+                        DllCall("shlwapi\IStream_Size", "Ptr", pFileStream, "UInt64P", &size:=0, "UInt")
                         DllCall("shlwapi\IStream_Copy", "Ptr", pFileStream, "Ptr", pStream, "UInt", size, "UInt")
                     } finally {
                         if pFileStream
@@ -568,20 +321,24 @@ class Discord
             utf8 := Buffer(length := StrPut(str, "UTF-8") - 1)
             StrPut(str, utf8, length, "UTF-8")
             DllCall("shlwapi\IStream_Write", "Ptr", pStream, "Ptr", utf8.Ptr, "UInt", length, "UInt")
+        } finally {
+            if pStream
+                ObjRelease(pStream)
+        }
 
-            pData := DllCall("GlobalLock", "Ptr", hData, "Ptr")
-            if !pData
-                throw Error("Unable to lock multipart buffer")
+        pData := DllCall("GlobalLock", "Ptr", hData, "Ptr")
+        if !pData {
+            DllCall("GlobalFree", "Ptr", hData, "Ptr")
+            throw Error("Unable to lock multipart buffer")
+        }
 
+        try {
             size := DllCall("GlobalSize", "Ptr", hData, "UPtr")
             retData := ComObjArray(0x11, size)
             pvData := NumGet(ComObjValue(retData), 8 + A_PtrSize, "Ptr")
             DllCall("RtlMoveMemory", "Ptr", pvData, "Ptr", pData, "UPtr", size)
         } finally {
-            if pData
-                DllCall("GlobalUnlock", "Ptr", hData)
-            if pStream
-                ObjRelease(pStream)
+            DllCall("GlobalUnlock", "Ptr", hData)
             DllCall("GlobalFree", "Ptr", hData, "Ptr")
         }
 

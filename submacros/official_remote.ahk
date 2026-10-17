@@ -6,7 +6,7 @@
 SetWorkingDir(A_ScriptDir "\..")
 global RemoteDir := A_AppData "\Ultimate_Macro\Options\Remote"
 global RemoteSettings := RemoteDir "\remote.ini"
-global ClientVersion := "1.3.5"
+global ClientVersion := "1.3.4a"
 if !DirExist(RemoteDir)
     DirCreate(RemoteDir)
 
@@ -131,8 +131,7 @@ SubmitResult(baseUrl, token, installId, jobId) {
     while (!FileExist(resultPath) && A_TickCount < deadline)
         Sleep(100)
     if !FileExist(resultPath) {
-        payload := Map("jobId", jobId, "ok", JSON.false, "result", Map("error",
-            "The macro timed out handling this command."))
+        payload := Map("jobId", jobId, "ok", JSON.false, "result", Map("error", "The macro timed out handling this command."))
     } else {
         payload := JSON.parse(FileRead(resultPath, "UTF-8"))
         FileDelete(resultPath)
@@ -195,8 +194,7 @@ SaveProtectedToken(token) {
     outputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
     NumPut("UInt", size, inputBlob, 0)
     NumPut("Ptr", input.Ptr, inputBlob, A_PtrSize)
-    if !DllCall("Crypt32\CryptProtectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 0x1,
-        "Ptr", outputBlob.Ptr)
+    if !DllCall("Crypt32\CryptProtectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 0x1, "Ptr", outputBlob.Ptr)
         throw Error("Windows could not protect the remote token.")
     protectedSize := NumGet(outputBlob, 0, "UInt")
     protectedPtr := NumGet(outputBlob, A_PtrSize, "Ptr")
@@ -221,8 +219,7 @@ LoadProtectedToken() {
     outputBlob := Buffer(A_PtrSize = 8 ? 16 : 8, 0)
     NumPut("UInt", encrypted.Size, inputBlob, 0)
     NumPut("Ptr", encrypted.Ptr, inputBlob, A_PtrSize)
-    if !DllCall("Crypt32\CryptUnprotectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 0x1,
-        "Ptr", outputBlob.Ptr)
+    if !DllCall("Crypt32\CryptUnprotectData", "Ptr", inputBlob.Ptr, "Ptr", 0, "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 0x1, "Ptr", outputBlob.Ptr)
         return ""
     plainSize := NumGet(outputBlob, 0, "UInt")
     plainPtr := NumGet(outputBlob, A_PtrSize, "Ptr")
@@ -232,11 +229,9 @@ LoadProtectedToken() {
 
 Base64EncodeBuffer(pointer, size) {
     chars := 0
-    DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001, "Ptr", 0, "UIntP", &chars
-    )
+    DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001, "Ptr", 0, "UIntP", &chars)
     output := Buffer(chars * 2)
-    if !DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001, "Ptr", output.Ptr,
-        "UIntP", &chars)
+    if !DllCall("Crypt32\CryptBinaryToStringW", "Ptr", pointer, "UInt", size, "UInt", 0x40000001, "Ptr", output.Ptr, "UIntP", &chars)
         throw Error("Could not protect the remote token.")
     return StrGet(output, "UTF-16")
 }
@@ -251,12 +246,10 @@ Base64UrlDecodeText(value) {
 
 Base64Decode(value) {
     size := 0
-    if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1, "Ptr", 0, "UIntP", &size, "Ptr", 0,
-        "Ptr", 0)
+    if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1, "Ptr", 0, "UIntP", &size, "Ptr", 0, "Ptr", 0)
         throw Error("The connection code could not be decoded.")
     decodedBytes := Buffer(size)
-    if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1, "Ptr", decodedBytes.Ptr, "UIntP", &
-        size, "Ptr", 0, "Ptr", 0)
+    if !DllCall("Crypt32\CryptStringToBinaryW", "Str", value, "UInt", 0, "UInt", 1, "Ptr", decodedBytes.Ptr, "UIntP", &size, "Ptr", 0, "Ptr", 0)
         throw Error("The connection code could not be decoded.")
     return decodedBytes
 }
@@ -273,11 +266,9 @@ Base64EncodeFile(path) {
     file.RawRead(fileBytes)
     file.Close()
     chars := 0
-    DllCall("Crypt32\CryptBinaryToStringW", "Ptr", fileBytes, "UInt", fileBytes.Size, "UInt", 0x40000001, "Ptr", 0,
-        "UIntP", &chars)
+    DllCall("Crypt32\CryptBinaryToStringW", "Ptr", fileBytes, "UInt", fileBytes.Size, "UInt", 0x40000001, "Ptr", 0, "UIntP", &chars)
     output := Buffer(chars * 2)
-    if !DllCall("Crypt32\CryptBinaryToStringW", "Ptr", fileBytes, "UInt", fileBytes.Size, "UInt", 0x40000001, "Ptr",
-        output, "UIntP", &chars)
+    if !DllCall("Crypt32\CryptBinaryToStringW", "Ptr", fileBytes, "UInt", fileBytes.Size, "UInt", 0x40000001, "Ptr", output, "UIntP", &chars)
         throw Error("Could not encode the screenshot.")
     return StrGet(output, "UTF-16")
 }

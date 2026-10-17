@@ -1,4 +1,7 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
+
+; Persistent runtime/crash logging for Ultimate Macro.
+; Logs are intentionally local-only and redact common secret formats before write.
 
 global RuntimeLogStoreMaxBytes := 2097152
 
@@ -57,6 +60,8 @@ RuntimeLogInstall(component := "Main", version := "") {
     RuntimeLogWrite("INFO", "session_start", "Runtime logging initialized",
         "version=" version "; ahk=" A_AhkVersion "; os=" A_OSVersion "; 64bit=" (A_PtrSize = 8 ? "yes" : "no"))
 
+    ; Keep normal AutoHotkey error behavior. The callback records the exception
+    ; and returns 0 so the normal error UI/termination semantics still apply.
     OnError(RuntimeLogOnError)
     OnExit(RuntimeLogOnExit)
 
@@ -101,6 +106,7 @@ RuntimeLogWrite(level, event, message := "", details := "") {
         RuntimeLogStoreAppend(line)
         return true
     } catch {
+        ; Logging must never crash the macro or recurse through OnError.
         return false
     }
 }
@@ -114,6 +120,9 @@ RuntimeLogStoreAppend(line) {
     entry := line "`n"
     entryBytes := StrPut(entry, "UTF-8") - 1
 
+    ; StoreBytes only counts this process. Re-stat periodically so a co-writer's
+    ; growth is seen, and always before rotating so we never move a file the
+    ; other process just rotated.
     if (++RuntimeLogState.StoreWrites >= 64) {
         RuntimeLogState.StoreWrites := 0
         RuntimeLogSyncStoreSize()
@@ -125,6 +134,7 @@ RuntimeLogStoreAppend(line) {
             RuntimeLogRotateStore()
     }
 
+    ; One retry: Main and the watchdog share the store.
     loop 2 {
         try {
             FileAppend(entry, RuntimeLogState.StoreFile, "UTF-8")
@@ -144,6 +154,7 @@ RuntimeLogSyncStoreSize() {
             ? FileGetSize(RuntimeLogState.StoreFile)
             : 0
     } catch {
+        ; Keep the running count if the file cannot be measured right now.
     }
 }
 
@@ -153,6 +164,8 @@ RuntimeLogRotateStore() {
     if (RuntimeLogState.StoreFile = "" || !FileExist(RuntimeLogState.StoreFile))
         return
 
+    ; Confirmed against the file, so a peer that already rotated cannot have its
+    ; archive overwritten by a second, nearly empty rotation.
     if (RuntimeLogState.StoreBytes < RuntimeLogStoreMaxBytes)
         return
 
@@ -160,6 +173,8 @@ RuntimeLogRotateStore() {
         FileMove(RuntimeLogState.StoreFile, RuntimeLogState.StoreArchive, true)
         RuntimeLogState.StoreBytes := 0
     } catch {
+        ; A locked archive must not stop logging. Back off one cycle so the next
+        ; write appends instead of retrying the move on every line.
         RuntimeLogState.StoreBytes := 0
     }
 }
@@ -171,7 +186,7 @@ RuntimeLogClear() {
         return 0
 
     removed := 0
-    loop files, RuntimeLogState.Dir "\*.log", "F" {
+    Loop Files, RuntimeLogState.Dir "\*.log", "F" {
         try {
             FileDelete(A_LoopFileFullPath)
             removed += 1
@@ -185,6 +200,7 @@ RuntimeLogClear() {
     return removed
 }
 
+; Total size of everything RuntimeLogClear() would delete.
 RuntimeLogStoredBytes() {
     global RuntimeLogState
 
@@ -192,18 +208,22 @@ RuntimeLogStoredBytes() {
     if (RuntimeLogState.Dir = "" || !DirExist(RuntimeLogState.Dir))
         return total
 
-    loop files, RuntimeLogState.Dir "\*.log", "F"
+    Loop Files, RuntimeLogState.Dir "\*.log", "F"
         total += A_LoopFileSize
 
     return total
+}
+
+RuntimeLogStorePath() {
+    global RuntimeLogState
+    return RuntimeLogState.StoreFile
 }
 
 RuntimeLogExportBundle(destination := "") {
     global RuntimeLogState
 
     if (destination = "")
-        destination := A_Temp "\\UltimateMacro-logs-" FormatTime(, "yyyyMMdd-HHmmss") "-pid" DllCall(
-            "Kernel32\\GetCurrentProcessId", "UInt") ".txt"
+        destination := A_Temp "\\UltimateMacro-logs-" FormatTime(, "yyyyMMdd-HHmmss") "-pid" DllCall("Kernel32\\GetCurrentProcessId", "UInt") ".txt"
 
     try {
         if FileExist(destination)
@@ -218,8 +238,10 @@ RuntimeLogExportBundle(destination := "") {
         header .= "`nLogs are locally redacted before export.`n"
         FileAppend(header, destination, "UTF-8")
 
-        files := [{ label: "Current session", path: RuntimeLogState.SessionFile }, { label: "Persistent runtime log",
-            path: RuntimeLogState.StoreFile }, { label: "Last crash report", path: RuntimeLogState.Dir "\\last-crash.log" }
+        files := [
+            {label: "Current session", path: RuntimeLogState.SessionFile},
+            {label: "Persistent runtime log", path: RuntimeLogState.StoreFile},
+            {label: "Last crash report", path: RuntimeLogState.Dir "\\last-crash.log"}
         ]
         for item in files {
             if (item.path = "" || !FileExist(item.path))
@@ -230,7 +252,7 @@ RuntimeLogExportBundle(destination := "") {
             maxChars := 350000
             if (StrLen(content) > maxChars)
                 content := "[older content truncated]`n" SubStr(content, StrLen(content) - maxChars + 1)
-            FileAppend("`n===== " item.label " =====`n" RuntimeLogRedact(content) "`n", destination, "UTF-8")
+            FileAppend("`n===== " item.label " =====`n" content "`n", destination, "UTF-8")
         }
         return destination
     } catch {
@@ -258,6 +280,8 @@ RuntimeLogOnError(err, mode) {
 
         RuntimeLogWrite("FATAL", "unhandled_exception", message, details)
 
+        ; Keep one easy-to-find copy for testers/support while retaining the
+        ; timestamped session log as the authoritative history.
         if (RuntimeLogState.Dir != "") {
             crashPath := RuntimeLogState.Dir "\last-crash.log"
             crashText := "Ultimate Macro crash report`n"
@@ -295,27 +319,31 @@ RuntimeLogSafeFile(path) {
 
 RuntimeLogRedact(value) {
     text := String(value)
-    ; Include other testers' profiles and JSON-escaped multiline stack paths.
-    text := RegExReplace(text, "i)[A-Z]:[\\/]+Users[\\/]+[^\\/\r\n]+", "[USERPROFILE]")
 
+    ; Discord webhook URLs contain a secret token in the path.
     text := RegExReplace(
         text,
         "i)https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/(?:v\d{1,2}/)?webhooks/[0-9]+/[A-Za-z0-9._-]+",
         "[REDACTED_DISCORD_WEBHOOK]"
     )
 
+    ; Roblox private-server links are shared credentials for a VIP server.
     text := RegExReplace(
         text,
         "i)(privateServerLinkCode=|share\?code=|linkCode=)[A-Za-z0-9]{16,}",
         "$1[REDACTED]"
     )
 
+    ; Avoid leaking common key/value secret fields into tester evidence. The
+    ; optional scheme word matters: without it "Authorization: Bearer <token>"
+    ; only redacted the word Bearer and left the token in the log.
     text := RegExReplace(
         text,
         "i)\b(Bot[_-]?Token|Authorization|Webhook[_-]?Link|Webhook[_-]?Url|Api[_-]?Key|Token|Secret|Password)\b\s*[:=]\s*[\x22\x27]?(?:Bearer|Bot|Basic)?\s*[^\s;|\x22\x27]+",
         "$1=[REDACTED]"
     )
 
+    ; Bare bot tokens and JWTs, which carry no key to match on.
     text := RegExReplace(
         text,
         "[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}",
@@ -331,7 +359,8 @@ RuntimeLogPrune(maxAgeDays := 14) {
         return
 
     try {
-        loop files, RuntimeLogState.Dir "\*.log", "F" {
+        Loop Files, RuntimeLogState.Dir "\*.log", "F" {
+            ; The persistent store is pruned by size, never by age.
             if (A_LoopFileFullPath = RuntimeLogState.SessionFile
                 || A_LoopFileFullPath = RuntimeLogState.StoreFile
                 || A_LoopFileFullPath = RuntimeLogState.StoreArchive)

@@ -1,4 +1,7 @@
-﻿OfficialRemoteDir() {
+; Official Ultimate Macro remote bridge. The worker process owns network polling;
+; Main.ahk only handles small authenticated command files in the user's AppData.
+
+OfficialRemoteDir() {
     global AppDataOpt
     dir := AppDataOpt "\Remote"
     if !DirExist(dir)
@@ -12,8 +15,7 @@ OfficialRemoteWorkerPath() {
 OfficialRemoteInit() {
     SetTimer(OfficialRemoteProcessCommands, 500)
     settings := OfficialRemoteDir() "\remote.ini"
-    if ((IniRead(settings, "Remote", "TokenProtected", "") != "" || IniRead(settings, "Remote", "Token", "") != "") &&
-        IniRead(settings, "Remote", "BaseUrl", "") != "")
+    if ((IniRead(settings, "Remote", "TokenProtected", "") != "" || IniRead(settings, "Remote", "Token", "") != "") && IniRead(settings, "Remote", "BaseUrl", "") != "")
         OfficialRemoteStartWorker()
 }
 
@@ -27,13 +29,21 @@ OfficialRemoteStartWorker(*) {
     Run('"' A_AhkPath '" "' worker '" worker', A_ScriptDir, "Hide")
 }
 
+OfficialRemoteOpenSetup(*) {
+    worker := OfficialRemoteWorkerPath()
+    if !FileExist(worker) {
+        ModernMsgBox("Remote Control", "The official Remote Control client is missing from this build.", "OK", "WARNING")
+        return
+    }
+    Run('"' A_AhkPath '" "' worker '" setup', A_ScriptDir)
+}
+
 OfficialRemoteRefreshControls() {
     global Tab4_RemoteStatus
     if !IsSet(Tab4_RemoteStatus) || !Tab4_RemoteStatus
         return
     settings := OfficialRemoteDir() "\remote.ini"
-    linked := (IniRead(settings, "Remote", "TokenProtected", "") != "" || IniRead(settings, "Remote", "Token", "") !=
-        "") && IniRead(settings, "Remote", "BaseUrl", "") != ""
+    linked := (IniRead(settings, "Remote", "TokenProtected", "") != "" || IniRead(settings, "Remote", "Token", "") != "") && IniRead(settings, "Remote", "BaseUrl", "") != ""
     Tab4_RemoteStatus.Text := linked ? "Connected to EngineerBot" : "Not linked yet"
     Tab4_RemoteStatus.SetFont(linked ? "c62D995" : "cAAAAAA")
 }
@@ -94,7 +104,7 @@ OfficialRemoteConnectFromControls(ctrl, *) {
 
 OfficialRemoteProcessCommands(*) {
     dir := OfficialRemoteDir()
-    loop files, dir "\command-*.json", "F" {
+    Loop Files, dir "\command-*.json", "F" {
         commandFile := A_LoopFileFullPath
         try {
             command := JSON.parse(FileRead(commandFile, "UTF-8"))

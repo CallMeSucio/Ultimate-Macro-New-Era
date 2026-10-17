@@ -1,4 +1,5 @@
-﻿HyperSleep(ms) {
+﻿HyperSleep(ms)
+{
     if (ms <= 0)
         return
 
@@ -8,6 +9,9 @@
     finish := begin + (ms * freq / 1000)
     current := begin
 
+    ; Sleep for the coarse part of the delay and reserve only a very small tail
+    ; for the high-resolution spin. This keeps placement timing accurate without
+    ; burning a CPU core for the whole requested delay.
     loop {
         DllCall("QueryPerformanceCounter", "Int64*", &current)
         remainingMs := (finish - current) * 1000 / freq
